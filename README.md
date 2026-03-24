@@ -1,6 +1,6 @@
 # options-tradebot
 
-Systematic options tradebot for the Brazilian market with a research-first workflow, fair-value pricing, small-capital sizing, paper trading, and MetaTrader 5 integration.
+Systematic options tradebot for the Brazilian market with a research-first workflow, fair-value pricing, small-capital sizing, paper trading, MetaTrader 5 integration, and Interactive Brokers Gateway support for US options.
 
 ## What This Project Does
 
@@ -11,6 +11,8 @@ The project turns a Black-Scholes-style mispricing idea into a B3-specific workf
 - size trades for small accounts using 1 to 5 contracts
 - paper trade through a journaled service loop
 - connect to MT5 for data collection and later demo/live order routing
+- connect to IB Gateway for US options chains, Greeks, quotes, history, and order routing
+- compare B3 and US implied volatility for dual-listed names such as `PETR4`/`PBR`
 
 The first production universe is:
 
@@ -18,6 +20,7 @@ The first production universe is:
 - `VALE3`
 - `BOVA11`
 - `WDO` options only when broker-side liquidity is confirmed in MT5
+- `PBR`, `VALE`, `XOM`, `CVX`, `SLB`, and `SPY` through IB Gateway
 
 ## Strategy Foundation
 
@@ -43,6 +46,8 @@ Implemented:
 - small-capital position sizing with Greek caps
 - paper broker and journaled service loop
 - MT5 data probe, snapshot collection, and order-routing adapters
+- IB Gateway connector with option chain discovery, broker Greeks, history, spreads, and position tracking
+- cross-market scanner support for B3 vs US vol-arb comparisons
 - reference market research docs and datasets
 - unit tests for pricing, sizing, and signal selection
 
@@ -66,6 +71,12 @@ pip install -e .
 
 ```powershell
 python scripts/probe_mt5.py --mt5-path "C:\Program Files\MetaTrader 5 Terminal\terminal64.exe"
+```
+
+### 2b. Probe IB Gateway
+
+```powershell
+python -m options_tradebot.cli.main ib-probe --ib-host 127.0.0.1 --ib-port 7497
 ```
 
 ### 3. Build an MT5 option mapping
@@ -103,6 +114,7 @@ python scripts/run_paper_trade.py --snapshots data/runtime/latest_option_snapsho
 
 ```powershell
 python -m options_tradebot.cli.main mt5-probe --mt5-path "C:\Program Files\MetaTrader 5 Terminal\terminal64.exe"
+python -m options_tradebot.cli.main ib-probe --ib-host 127.0.0.1 --ib-port 7497
 python -m options_tradebot.cli.main research-summary --snapshots data/runtime/latest_option_snapshots.csv
 python -m options_tradebot.cli.main backtest --snapshots data/runtime/latest_option_snapshots.csv
 python -m options_tradebot.cli.main paper --snapshots data/runtime/latest_option_snapshots.csv

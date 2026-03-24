@@ -183,6 +183,8 @@ class PaperBroker:
 
 
 def _snapshot_greeks(snapshot: OptionSnapshot, *, implied_vol: float | None = None) -> GreekVector:
+    if snapshot.broker_greeks is not None:
+        return snapshot.broker_greeks
     volatility = implied_vol
     if volatility is None or volatility <= 0:
         volatility = snapshot.implied_vol if snapshot.implied_vol is not None and snapshot.implied_vol > 0 else 0.20

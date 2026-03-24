@@ -290,7 +290,7 @@ class FairValueOptionsStrategy:
                 option_type=snapshot.contract.option_type,
             )
             spot_for_greeks = snapshot.underlying_price
-        greeks = black_scholes_greeks(
+        model_greeks = black_scholes_greeks(
             spot=spot_for_greeks,
             strike=snapshot.contract.strike,
             time_to_expiry=snapshot.time_to_expiry,
@@ -299,6 +299,7 @@ class FairValueOptionsStrategy:
             volatility=fair_vol,
             option_type=snapshot.contract.option_type,
         )
+        greeks = snapshot.broker_greeks or model_greeks
         abs_delta = abs(greeks.delta)
         if abs_delta < universe.min_delta or abs_delta > universe.max_delta:
             return None

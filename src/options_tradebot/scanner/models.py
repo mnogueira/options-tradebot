@@ -29,6 +29,8 @@ class OptionMispricingFinding:
     open_interest: int | None
     thesis: str
     score: float
+    market: str = "B3"
+    currency: str = "BRL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,47 @@ class UnderlyingScanResult:
     composite_score: float
     surface_method: str
     top_options: tuple[OptionMispricingFinding, ...]
+    market: str = "B3"
+    currency: str = "BRL"
+
+
+@dataclass(frozen=True, slots=True)
+class CrossMarketVolArbFinding:
+    """Relative-value volatility opportunity across B3 and US options."""
+
+    pair: str
+    option_type: OptionKind
+    rich_underlying: str
+    rich_market: str
+    rich_symbol: str
+    rich_expiry: str
+    rich_strike: float
+    rich_iv: float
+    rich_dte: int
+    rich_moneyness: float
+    cheap_underlying: str
+    cheap_market: str
+    cheap_symbol: str
+    cheap_expiry: str
+    cheap_strike: float
+    cheap_iv: float
+    cheap_dte: int
+    cheap_moneyness: float
+    iv_gap: float
+    dte_gap: int
+    moneyness_gap: float
+    liquidity_score: float
+    score: float
+    action: str
+    thesis: str
+
+
+@dataclass(frozen=True, slots=True)
+class CrossMarketScanResult:
+    """Multi-market scanner output with relative-value ideas."""
+
+    underlyings: tuple[UnderlyingScanResult, ...]
+    vol_arb_opportunities: tuple[CrossMarketVolArbFinding, ...]
 
 
 def scan_results_to_frame(results: list[UnderlyingScanResult]) -> pd.DataFrame:
@@ -70,3 +113,9 @@ def scan_results_to_frame(results: list[UnderlyingScanResult]) -> pd.DataFrame:
         )
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def cross_market_findings_to_frame(findings: list[CrossMarketVolArbFinding]) -> pd.DataFrame:
+    """Flatten cross-market volatility opportunities into a DataFrame."""
+
+    return pd.DataFrame(asdict(finding) for finding in findings)

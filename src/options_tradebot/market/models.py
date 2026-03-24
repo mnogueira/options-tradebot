@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from math import exp
-from math import isnan
 
 import pandas as pd
 
@@ -52,6 +51,11 @@ class OptionContract:
     underlying_type: UnderlyingType = UnderlyingType.SPOT
     contract_multiplier: int = 100
     exercise_style: str = "european"
+    exchange: str | None = None
+    currency: str = "BRL"
+    contract_id: int | None = None
+    local_symbol: str | None = None
+    trading_class: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +100,8 @@ class OptionSnapshot:
     dividend_yield: float = 0.0
     implied_vol: float | None = None
     underlying_forward: float | None = None
+    market: str = "B3"
+    broker_greeks: GreekVector | None = None
 
     @property
     def time_to_expiry(self) -> float:

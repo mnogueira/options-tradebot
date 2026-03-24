@@ -1,9 +1,9 @@
-"""Cross-sectional mispricing scanner for B3 options."""
+"""Cross-sectional mispricing scanner for B3 and US options."""
 
 from __future__ import annotations
 
 from dataclasses import asdict
-from math import exp
+from math import exp, log
 from pathlib import Path
 
 import numpy as np
@@ -20,15 +20,16 @@ from options_tradebot.market.pricing import (
 )
 from options_tradebot.market.surface import calibrate_surface
 from options_tradebot.scanner.models import (
+    CrossMarketScanResult,
+    CrossMarketVolArbFinding,
     OptionMispricingFinding,
     UnderlyingScanResult,
     scan_results_to_frame,
 )
-from options_tradebot.scanner.sources import discover_optionable_assets
 
 
 class MispricingScanner:
-    """Rank B3 underlyings by current options mispricing likelihood."""
+    """Rank B3 and US underlyings by current options mispricing likelihood."""
 
     def __init__(self, settings: AppSettings | None = None):
         self.settings = settings or default_settings()
@@ -42,32 +43,36 @@ class MispricingScanner:
     ) -> list[UnderlyingScanResult]:
         """Scan an in-memory snapshot list."""
 
-        frame = pd.DataFrame(
-            [
-                {
-                    "timestamp": pd.Timestamp(snapshot.timestamp),
-                    "symbol": snapshot.contract.symbol,
-                    "underlying": snapshot.contract.underlying,
-                    "option_type": snapshot.contract.option_type.value,
-                    "strike": snapshot.contract.strike,
-                    "expiry": pd.Timestamp(snapshot.contract.expiry),
-                    "underlying_type": snapshot.contract.underlying_type.value,
-                    "contract_multiplier": snapshot.contract.contract_multiplier,
-                    "bid": snapshot.quote.bid,
-                    "ask": snapshot.quote.ask,
-                    "last": snapshot.quote.last,
-                    "volume": snapshot.quote.volume,
-                    "open_interest": snapshot.quote.open_interest,
-                    "underlying_price": snapshot.underlying_price,
-                    "risk_free_rate": snapshot.risk_free_rate,
-                    "dividend_yield": snapshot.dividend_yield,
-                    "implied_vol": snapshot.implied_vol,
-                    "underlying_forward": snapshot.underlying_forward,
-                }
-                for snapshot in snapshots
-            ]
-        )
+        frame = self._frame_from_snapshots(snapshots)
         return self.scan_frame(frame, events=events, top_n=top_n)
+
+    def scan_cross_market_snapshots(
+        self,
+        snapshots: list[OptionSnapshot],
+        *,
+        events: pd.DataFrame | None = None,
+        top_n: int | None = None,
+    ) -> CrossMarketScanResult:
+        """Scan all markets and attach explicit cross-market volatility opportunities."""
+
+        frame = self._frame_from_snapshots(snapshots)
+        return self.scan_cross_market_frame(frame, events=events, top_n=top_n)
+
+    def scan_cross_market_frame(
+        self,
+        frame: pd.DataFrame,
+        *,
+        events: pd.DataFrame | None = None,
+        top_n: int | None = None,
+    ) -> CrossMarketScanResult:
+        """Scan a normalized multi-market frame and add relative-value vol-arb findings."""
+
+        rankings = self.scan_frame(frame, events=events, top_n=top_n)
+        findings = self.find_cross_market_vol_arb_frame(frame)
+        return CrossMarketScanResult(
+            underlyings=tuple(rankings),
+            vol_arb_opportunities=tuple(findings[: self.settings.scanner.cross_market_top_n]),
+        )
 
     def scan_frame(
         self,
@@ -81,13 +86,27 @@ class MispricingScanner:
         if frame.empty:
             return []
         working = frame.copy()
+        if "market" not in working.columns:
+            working["market"] = "B3"
+        if "currency" not in working.columns:
+            working["currency"] = "BRL"
         working["timestamp"] = pd.to_datetime(working["timestamp"])
         working["expiry"] = pd.to_datetime(working["expiry"])
-        universe = discover_optionable_assets(snapshot_frame=working)
         raw_results: list[dict[str, object]] = []
 
-        for underlying in universe:
-            underlying_frame = working.loc[working["underlying"] == underlying].copy()
+        universe = (
+            working.loc[:, ["market", "currency", "underlying"]]
+            .dropna(subset=["underlying"])
+            .drop_duplicates()
+            .sort_values(["market", "underlying"])
+        )
+        for item in universe.itertuples(index=False):
+            market = str(item.market)
+            currency = str(item.currency)
+            underlying = str(item.underlying)
+            underlying_frame = working.loc[
+                (working["underlying"] == underlying) & (working["market"] == market)
+            ].copy()
             if underlying_frame.empty:
                 continue
             latest_timestamp = underlying_frame["timestamp"].max()
@@ -151,6 +170,8 @@ class MispricingScanner:
                     "best_option_edge_pct": best_option_edge_pct,
                     "surface_method": diagnostics.model_name,
                     "top_options": tuple(option_findings[: self.settings.scanner.top_option_count]),
+                    "market": market,
+                    "currency": currency,
                 }
             )
 
@@ -182,6 +203,113 @@ class MispricingScanner:
             encoding="utf-8",
         )
         return output_path
+
+    def find_cross_market_vol_arb_snapshots(
+        self,
+        snapshots: list[OptionSnapshot],
+    ) -> list[CrossMarketVolArbFinding]:
+        """Find the richest cross-market volatility spreads from in-memory snapshots."""
+
+        return self.find_cross_market_vol_arb_frame(self._frame_from_snapshots(snapshots))
+
+    def find_cross_market_vol_arb_frame(
+        self,
+        frame: pd.DataFrame,
+    ) -> list[CrossMarketVolArbFinding]:
+        """Match B3 and US contracts with similar moneyness and DTE to surface IV gaps."""
+
+        if frame.empty:
+            return []
+        working = frame.copy()
+        if "market" not in working.columns:
+            working["market"] = "B3"
+        if "currency" not in working.columns:
+            working["currency"] = "BRL"
+        working["timestamp"] = pd.to_datetime(working["timestamp"])
+        working["expiry"] = pd.to_datetime(working["expiry"])
+        latest_chains: dict[tuple[str, str], list[OptionSnapshot]] = {}
+        for (market, underlying), slice_frame in working.groupby(["market", "underlying"], dropna=False):
+            latest_timestamp = slice_frame["timestamp"].max()
+            latest_slice = slice_frame.loc[slice_frame["timestamp"] == latest_timestamp].copy()
+            latest_slice = latest_slice.dropna(subset=["implied_vol", "underlying_price"])
+            if latest_slice.empty:
+                continue
+            latest_chains[(str(market), str(underlying))] = snapshots_from_frame(latest_slice)
+
+        findings: list[CrossMarketVolArbFinding] = []
+        for b3_underlying, us_underlying in self.settings.scanner.dual_listed_pairs:
+            b3_chain = self._resolve_chain(
+                latest_chains,
+                underlying=b3_underlying,
+                preferred_markets=("B3", "BR"),
+            )
+            us_chain = self._resolve_chain(
+                latest_chains,
+                underlying=us_underlying,
+                preferred_markets=("US", "IB"),
+            )
+            if not b3_chain or not us_chain:
+                continue
+            pair = f"{b3_underlying}/{us_underlying}"
+            for candidate in b3_chain:
+                if candidate.implied_vol is None:
+                    continue
+                counterpart = self._best_cross_market_match(candidate, us_chain)
+                if counterpart is None or counterpart.implied_vol is None:
+                    continue
+                iv_gap = float(candidate.implied_vol - counterpart.implied_vol)
+                if abs(iv_gap) < self.settings.scanner.cross_market_min_iv_gap:
+                    continue
+                candidate_moneyness = self._snapshot_moneyness(candidate)
+                counterpart_moneyness = self._snapshot_moneyness(counterpart)
+                moneyness_gap = abs(candidate_moneyness - counterpart_moneyness)
+                dte_gap = abs(candidate.dte - counterpart.dte)
+                liquidity_score = self._cross_market_liquidity_score(candidate, counterpart)
+                match_score = max(
+                    1.0 - moneyness_gap / max(self.settings.scanner.cross_market_max_moneyness_gap, 1e-8),
+                    0.0,
+                ) * max(
+                    1.0 - dte_gap / max(self.settings.scanner.cross_market_max_dte_gap, 1),
+                    0.0,
+                )
+                score = abs(iv_gap) * liquidity_score * max(match_score, 0.0) * 100.0
+                rich_leg, cheap_leg = (
+                    (candidate, counterpart) if iv_gap >= 0 else (counterpart, candidate)
+                )
+                findings.append(
+                    CrossMarketVolArbFinding(
+                        pair=pair,
+                        option_type=rich_leg.contract.option_type,
+                        rich_underlying=rich_leg.contract.underlying,
+                        rich_market=rich_leg.market,
+                        rich_symbol=rich_leg.contract.symbol,
+                        rich_expiry=rich_leg.contract.expiry.isoformat(),
+                        rich_strike=rich_leg.contract.strike,
+                        rich_iv=float(rich_leg.implied_vol or 0.0),
+                        rich_dte=rich_leg.dte,
+                        rich_moneyness=self._snapshot_moneyness(rich_leg),
+                        cheap_underlying=cheap_leg.contract.underlying,
+                        cheap_market=cheap_leg.market,
+                        cheap_symbol=cheap_leg.contract.symbol,
+                        cheap_expiry=cheap_leg.contract.expiry.isoformat(),
+                        cheap_strike=cheap_leg.contract.strike,
+                        cheap_iv=float(cheap_leg.implied_vol or 0.0),
+                        cheap_dte=cheap_leg.dte,
+                        cheap_moneyness=self._snapshot_moneyness(cheap_leg),
+                        iv_gap=abs(iv_gap),
+                        dte_gap=dte_gap,
+                        moneyness_gap=moneyness_gap,
+                        liquidity_score=liquidity_score,
+                        score=float(score),
+                        action=f"SELL_{rich_leg.contract.underlying}_BUY_{cheap_leg.contract.underlying}",
+                        thesis=(
+                            f"{rich_leg.contract.underlying} {rich_leg.contract.option_type.value} IV "
+                            f"is richer than {cheap_leg.contract.underlying} at similar moneyness."
+                        ),
+                    )
+                )
+        findings.sort(key=lambda item: (item.score, item.iv_gap), reverse=True)
+        return findings[: self.settings.scanner.cross_market_top_n]
 
     def _rank_option_findings(
         self,
@@ -227,6 +355,8 @@ class MispricingScanner:
                     open_interest=snapshot.quote.open_interest,
                     thesis="SHORT_VOL_RICH_PREMIUM" if edge_reais >= 0 else "LONG_VOL_CHEAP_PREMIUM",
                     score=float(score),
+                    market=snapshot.market,
+                    currency=snapshot.contract.currency,
                 )
             )
 
@@ -468,3 +598,117 @@ class MispricingScanner:
         if std <= 1e-9:
             return float(series.iloc[-1] - mean)
         return float((series.iloc[-1] - mean) / std)
+
+    @staticmethod
+    def _frame_from_snapshots(snapshots: list[OptionSnapshot]) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp(snapshot.timestamp),
+                    "symbol": snapshot.contract.symbol,
+                    "underlying": snapshot.contract.underlying,
+                    "option_type": snapshot.contract.option_type.value,
+                    "strike": snapshot.contract.strike,
+                    "expiry": pd.Timestamp(snapshot.contract.expiry),
+                    "underlying_type": snapshot.contract.underlying_type.value,
+                    "contract_multiplier": snapshot.contract.contract_multiplier,
+                    "exercise_style": snapshot.contract.exercise_style,
+                    "exchange": snapshot.contract.exchange,
+                    "currency": snapshot.contract.currency,
+                    "contract_id": snapshot.contract.contract_id,
+                    "local_symbol": snapshot.contract.local_symbol,
+                    "trading_class": snapshot.contract.trading_class,
+                    "bid": snapshot.quote.bid,
+                    "ask": snapshot.quote.ask,
+                    "last": snapshot.quote.last,
+                    "volume": snapshot.quote.volume,
+                    "open_interest": snapshot.quote.open_interest,
+                    "underlying_price": snapshot.underlying_price,
+                    "risk_free_rate": snapshot.risk_free_rate,
+                    "dividend_yield": snapshot.dividend_yield,
+                    "implied_vol": snapshot.implied_vol,
+                    "underlying_forward": snapshot.underlying_forward,
+                    "market": snapshot.market,
+                    "broker_delta": None if snapshot.broker_greeks is None else snapshot.broker_greeks.delta,
+                    "broker_gamma": None if snapshot.broker_greeks is None else snapshot.broker_greeks.gamma,
+                    "broker_vega": None if snapshot.broker_greeks is None else snapshot.broker_greeks.vega,
+                    "broker_theta": None if snapshot.broker_greeks is None else snapshot.broker_greeks.theta,
+                }
+                for snapshot in snapshots
+            ]
+        )
+
+    @staticmethod
+    def _resolve_chain(
+        chains: dict[tuple[str, str], list[OptionSnapshot]],
+        *,
+        underlying: str,
+        preferred_markets: tuple[str, ...],
+    ) -> list[OptionSnapshot]:
+        for market in preferred_markets:
+            chain = chains.get((market, underlying))
+            if chain:
+                return chain
+        for (market, symbol), chain in chains.items():
+            if symbol == underlying and chain:
+                return chain
+        return []
+
+    def _best_cross_market_match(
+        self,
+        snapshot: OptionSnapshot,
+        candidates: list[OptionSnapshot],
+    ) -> OptionSnapshot | None:
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.implied_vol is not None
+            and candidate.contract.option_type == snapshot.contract.option_type
+        ]
+        if not eligible:
+            return None
+        ranked = sorted(
+            eligible,
+            key=lambda candidate: (
+                abs(snapshot.dte - candidate.dte),
+                abs(self._snapshot_moneyness(snapshot) - self._snapshot_moneyness(candidate)),
+                max(snapshot.quote.spread_pct, candidate.quote.spread_pct),
+            ),
+        )
+        best = ranked[0]
+        if abs(snapshot.dte - best.dte) > self.settings.scanner.cross_market_max_dte_gap:
+            return None
+        if (
+            abs(self._snapshot_moneyness(snapshot) - self._snapshot_moneyness(best))
+            > self.settings.scanner.cross_market_max_moneyness_gap
+        ):
+            return None
+        return best
+
+    @staticmethod
+    def _snapshot_moneyness(snapshot: OptionSnapshot) -> float:
+        return float(log(max(snapshot.contract.strike, 1e-8) / max(snapshot.forward_price, 1e-8)))
+
+    def _cross_market_liquidity_score(
+        self,
+        left: OptionSnapshot,
+        right: OptionSnapshot,
+    ) -> float:
+        left_quality = max(
+            1.0 - left.quote.spread_pct / max(self.settings.scanner.max_tradeable_spread_pct, 1e-6),
+            0.0,
+        )
+        right_quality = max(
+            1.0 - right.quote.spread_pct / max(self.settings.scanner.max_tradeable_spread_pct, 1e-6),
+            0.0,
+        )
+        flow = np.tanh(
+            np.log1p(
+                left.quote.volume
+                + (left.quote.open_interest or 0)
+                + right.quote.volume
+                + (right.quote.open_interest or 0)
+            )
+            / 10.0
+        )
+        return float(min(left_quality, right_quality) * max(flow, 0.1))

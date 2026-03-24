@@ -94,6 +94,15 @@ class ScannerConfig:
     weight_option_edge: float = 0.10
     weight_skew_alpha: float = 0.15
     skew_alpha_underlyings: tuple[str, ...] = ("PETR4", "VALE3")
+    ib_watchlist: tuple[str, ...] = ("PBR", "VALE", "XOM", "CVX", "SLB", "SPY")
+    dual_listed_pairs: tuple[tuple[str, str], ...] = (
+        ("PETR4", "PBR"),
+        ("VALE3", "VALE"),
+    )
+    cross_market_top_n: int = 10
+    cross_market_min_iv_gap: float = 0.02
+    cross_market_max_dte_gap: int = 7
+    cross_market_max_moneyness_gap: float = 0.08
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +113,11 @@ class EnvironmentConfig:
     mt5_password: str | None = None
     mt5_server: str | None = None
     mt5_path: str | None = None
+    ib_host: str = "127.0.0.1"
+    ib_port: int = 7497
+    ib_client_id: int = 7
+    ib_account: str | None = None
+    ib_market_data_type: int = 1
     mode: str = "paper"
 
 
@@ -118,23 +132,42 @@ class AppSettings:
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     default_risk_free_rate: float = 0.14
+    default_usd_risk_free_rate: float = 0.045
 
 
 def default_settings() -> AppSettings:
     """Return the default app settings."""
 
     _load_dotenv()
+    default_output_dir = "runtime/paper"
+    default_ib_host = "127.0.0.1"
+    default_ib_port = 7497
+    default_ib_client_id = 7
+    default_ib_market_data_type = 1
+    default_mode = "paper"
+    default_brl_risk_free_rate = 0.14
+    default_usd_risk_free_rate = 0.045
     paper = PaperTradingConfig(
-        output_dir=os.environ.get("OPTIONS_TRADEBOT_OUTPUT_DIR", PaperTradingConfig.output_dir),
+        output_dir=os.environ.get("OPTIONS_TRADEBOT_OUTPUT_DIR", default_output_dir),
     )
     environment = EnvironmentConfig(
         mt5_login=_env_int("MT5_LOGIN"),
         mt5_password=os.environ.get("MT5_PASSWORD") or None,
         mt5_server=os.environ.get("MT5_SERVER") or None,
         mt5_path=os.environ.get("MT5_PATH") or None,
-        mode=os.environ.get("OPTIONS_TRADEBOT_MODE", EnvironmentConfig.mode),
+        ib_host=os.environ.get("IB_HOST", default_ib_host),
+        ib_port=_env_int("IB_PORT") or default_ib_port,
+        ib_client_id=_env_int("IB_CLIENT_ID") or default_ib_client_id,
+        ib_account=os.environ.get("IB_ACCOUNT") or None,
+        ib_market_data_type=_env_int("IB_MARKET_DATA_TYPE") or default_ib_market_data_type,
+        mode=os.environ.get("OPTIONS_TRADEBOT_MODE", default_mode),
     )
-    return AppSettings(paper=paper, environment=environment)
+    return AppSettings(
+        paper=paper,
+        environment=environment,
+        default_risk_free_rate=_env_float("OPTIONS_TRADEBOT_BRL_RISK_FREE_RATE", default_brl_risk_free_rate),
+        default_usd_risk_free_rate=_env_float("OPTIONS_TRADEBOT_USD_RISK_FREE_RATE", default_usd_risk_free_rate),
+    )
 
 
 def _env_int(name: str) -> int | None:
@@ -142,6 +175,13 @@ def _env_int(name: str) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return float(default)
+    return float(value)
 
 
 def _load_dotenv(path: str = ".env") -> None:

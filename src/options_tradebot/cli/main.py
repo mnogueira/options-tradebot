@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from options_tradebot.config import default_settings
+from options_tradebot.connectors.ib import IBGatewayClient, IBGatewayConfig
 from options_tradebot.data import MT5ConnectionConfig, MT5MarketDataClient, load_snapshot_csv
 from options_tradebot.data.models import snapshots_from_frame
 from options_tradebot.execution import PaperTradingService
@@ -22,6 +23,13 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--mt5-login", type=int)
     probe.add_argument("--mt5-password")
     probe.add_argument("--mt5-server")
+
+    ib_probe = subparsers.add_parser("ib-probe", help="Probe the IB Gateway paper account connection.")
+    ib_probe.add_argument("--ib-host")
+    ib_probe.add_argument("--ib-port", type=int)
+    ib_probe.add_argument("--ib-client-id", type=int)
+    ib_probe.add_argument("--ib-account")
+    ib_probe.add_argument("--ib-market-data-type", type=int)
 
     research = subparsers.add_parser("research-summary", help="Summarize an options snapshot CSV.")
     research.add_argument("--snapshots", required=True)
@@ -63,6 +71,26 @@ def main() -> int:
         summary = summarize_liquidity(frame)
         print(summary.to_string(index=False))
         return 0
+
+    if args.command == "ib-probe":
+        client = IBGatewayClient(
+            IBGatewayConfig(
+                host=args.ib_host or settings.environment.ib_host,
+                port=args.ib_port or settings.environment.ib_port,
+                client_id=args.ib_client_id or settings.environment.ib_client_id,
+                account=args.ib_account or settings.environment.ib_account,
+                market_data_type=(
+                    args.ib_market_data_type or settings.environment.ib_market_data_type
+                ),
+                risk_free_rate=settings.default_usd_risk_free_rate,
+            )
+        )
+        try:
+            payload = client.connect()
+            print(json.dumps(payload, indent=2, default=str))
+            return 0
+        finally:
+            client.disconnect()
 
     if args.command == "backtest":
         frame = load_snapshot_csv(args.snapshots)
