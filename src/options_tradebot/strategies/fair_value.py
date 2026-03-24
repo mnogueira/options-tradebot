@@ -59,6 +59,7 @@ class StrategySignal:
     fair_value: float | None
     fair_volatility: float | None
     reason: str
+    greeks: GreekVector | None = None
     score: float = 0.0
 
 
@@ -110,6 +111,7 @@ class FairValueOptionsStrategy:
                 stop_price=None,
                 fair_value=None,
                 fair_volatility=None,
+                greeks=None,
                 reason="empty_chain",
             )
         bias = self.market_bias(underlying_history)
@@ -124,17 +126,23 @@ class FairValueOptionsStrategy:
                 stop_price=None,
                 fair_value=None,
                 fair_volatility=None,
+                greeks=None,
                 reason="neutral_regime",
             )
         fitted_surface = surface
         if fitted_surface is None:
-            fitted_surface, _ = calibrate_surface(chain)
+            fitted_surface, _ = calibrate_surface(
+                chain,
+                method=self.settings.strategy.surface_method,
+                min_points=self.settings.scanner.min_surface_points,
+            )
         returns = np.log(underlying_history.astype(float)).diff().dropna().tail(
             self.settings.strategy.realized_vol_lookback
         )
         realized_vol = annualized_realized_volatility(returns)
         forecast_vol = garch11_forecast_volatility(
             returns,
+            omega=self.settings.strategy.garch_omega,
             alpha=self.settings.strategy.garch_alpha,
             beta=self.settings.strategy.garch_beta,
         )
@@ -160,6 +168,7 @@ class FairValueOptionsStrategy:
                 stop_price=None,
                 fair_value=None,
                 fair_volatility=None,
+                greeks=None,
                 reason="no_viable_candidate",
             )
         best = max(viable, key=lambda item: item.score)
@@ -193,6 +202,7 @@ class FairValueOptionsStrategy:
                 stop_price=None,
                 fair_value=best.fair_value,
                 fair_volatility=best.fair_volatility,
+                greeks=best.greeks,
                 reason=sizing.reason if sizing.rejected else "non_positive_score",
                 score=max(best.score, 0.0),
             )
@@ -216,6 +226,7 @@ class FairValueOptionsStrategy:
             stop_price=stop_price,
             fair_value=best.fair_value,
             fair_volatility=best.fair_volatility,
+            greeks=best.greeks,
             reason="approved",
             score=best.score,
         )
@@ -232,10 +243,6 @@ class FairValueOptionsStrategy:
         """Score one candidate option."""
 
         universe = self.settings.universe
-        if snapshot.contract.underlying not in (
-            universe.primary_underlyings + universe.secondary_underlyings
-        ):
-            return None
         if snapshot.dte < universe.min_dte or snapshot.dte > universe.max_dte:
             return None
         if snapshot.quote.volume < universe.min_daily_volume:

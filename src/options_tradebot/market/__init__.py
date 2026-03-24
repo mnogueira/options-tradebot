@@ -19,8 +19,12 @@ from options_tradebot.market.pricing import (
 )
 from options_tradebot.market.surface import (
     LiquidityWeightedVolSurface,
+    SVISliceParameters,
+    SVIVolSurface,
     SurfaceCalibrationResult,
     calibrate_surface,
+    calibrate_svi_surface,
+    calibrate_wls_surface,
 )
 
 __all__ = [
@@ -31,12 +35,16 @@ __all__ = [
     "OptionSnapshot",
     "UnderlyingType",
     "LiquidityWeightedVolSurface",
+    "SVISliceParameters",
+    "SVIVolSurface",
     "SurfaceCalibrationResult",
     "annualized_realized_volatility",
     "black_76_price",
     "black_scholes_greeks",
     "black_scholes_price",
     "calibrate_surface",
+    "calibrate_svi_surface",
+    "calibrate_wls_surface",
     "corrado_su_price",
     "garch11_forecast_volatility",
     "implied_volatility",

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-import unittest
 from datetime import date, timedelta
+from pathlib import Path
+import sys
+import unittest
 
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from options_tradebot.config import default_settings
 from options_tradebot.market import OptionContract, OptionKind, OptionQuote, OptionSnapshot

@@ -7,7 +7,8 @@ from datetime import date
 import json
 from pathlib import Path
 
-from options_tradebot.market.models import OptionSnapshot
+from options_tradebot.market.models import GreekVector, OptionSnapshot, UnderlyingType
+from options_tradebot.market.pricing import black_scholes_greeks
 from options_tradebot.strategies.fair_value import StrategySignal
 
 
@@ -25,6 +26,7 @@ class PaperPosition:
     stop_price: float
     expiry: date
     contract_multiplier: int
+    current_greeks: GreekVector
     strategy_reason: str
 
     @property
@@ -68,6 +70,10 @@ class PaperBroker:
         if total_cost > self.cash:
             return False
         self.cash -= total_cost
+        current_greeks = _scale_greeks(
+            signal.greeks or _snapshot_greeks(snapshot, implied_vol=signal.fair_volatility),
+            factor=snapshot.contract.contract_multiplier * signal.contracts,
+        )
         self.positions[signal.contract_symbol] = PaperPosition(
             symbol=snapshot.contract.symbol,
             underlying=snapshot.contract.underlying,
@@ -79,6 +85,7 @@ class PaperBroker:
             stop_price=signal.stop_price or signal.entry_price,
             expiry=snapshot.contract.expiry,
             contract_multiplier=snapshot.contract.contract_multiplier,
+            current_greeks=current_greeks,
             strategy_reason=signal.reason,
         )
         return True
@@ -102,6 +109,10 @@ class PaperBroker:
                 stop_price=position.stop_price,
                 expiry=position.expiry,
                 contract_multiplier=position.contract_multiplier,
+                current_greeks=_scale_greeks(
+                    _snapshot_greeks(snapshot),
+                    factor=position.contract_multiplier * position.contracts,
+                ),
                 strategy_reason=position.strategy_reason,
             )
 
@@ -169,3 +180,33 @@ class PaperBroker:
         target = directory / "paper_state.json"
         target.write_text(json.dumps(self.portfolio_state(), indent=2, default=str), encoding="utf-8")
         return target
+
+
+def _snapshot_greeks(snapshot: OptionSnapshot, *, implied_vol: float | None = None) -> GreekVector:
+    volatility = implied_vol
+    if volatility is None or volatility <= 0:
+        volatility = snapshot.implied_vol if snapshot.implied_vol is not None and snapshot.implied_vol > 0 else 0.20
+    if snapshot.contract.underlying_type == UnderlyingType.FUTURE:
+        spot = snapshot.forward_price
+        dividend_yield = 0.0
+    else:
+        spot = snapshot.underlying_price
+        dividend_yield = snapshot.dividend_yield
+    return black_scholes_greeks(
+        spot=spot,
+        strike=snapshot.contract.strike,
+        time_to_expiry=snapshot.time_to_expiry,
+        rate=snapshot.risk_free_rate,
+        dividend_yield=dividend_yield,
+        volatility=volatility,
+        option_type=snapshot.contract.option_type,
+    )
+
+
+def _scale_greeks(greeks: GreekVector, *, factor: int) -> GreekVector:
+    return GreekVector(
+        delta=greeks.delta * factor,
+        gamma=greeks.gamma * factor,
+        vega=greeks.vega * factor,
+        theta=greeks.theta * factor,
+    )

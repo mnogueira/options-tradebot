@@ -61,8 +61,9 @@ class OptionBacktester:
         equity_points: list[dict[str, object]] = []
         for timestamp, slice_frame in working.groupby("timestamp"):
             history_buffer = pd.concat([history_buffer, slice_frame], ignore_index=True)
+            underlying_histories = _underlying_histories_from_buffer(history_buffer)
             chain = snapshots_from_frame(history_buffer)
-            step = service.run_once(chain)
+            step = service.run_once(chain, underlying_histories=underlying_histories)
             equity_points.append(
                 {
                     "timestamp": timestamp,
@@ -79,3 +80,18 @@ class OptionBacktester:
         equity_curve.to_csv(directory / "equity_curve.csv", index=False)
         trades.to_csv(directory / "trades.csv", index=False)
         return BacktestResult(equity_curve=equity_curve, trades=trades, output_dir=str(directory))
+
+
+def _underlying_histories_from_buffer(frame: pd.DataFrame) -> dict[str, pd.Series]:
+    histories: dict[str, pd.Series] = {}
+    for underlying, slice_frame in frame.groupby("underlying", dropna=False):
+        ordered = (
+            slice_frame.loc[:, ["timestamp", "underlying_price"]]
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .sort_values("timestamp")
+        )
+        histories[str(underlying)] = pd.Series(
+            ordered["underlying_price"].astype(float).values,
+            index=pd.to_datetime(ordered["timestamp"]),
+        )
+    return histories

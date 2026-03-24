@@ -9,7 +9,7 @@ from typing import Iterable
 import numpy as np
 from scipy.optimize import brentq
 
-from options_tradebot.market.models import GreekVector, OptionKind
+from options_tradebot.market.models import GreekVector, OptionKind, TRADING_DAYS_PER_YEAR
 
 _N = NormalDist()
 
@@ -98,7 +98,10 @@ def black_scholes_greeks(
     volatility: float,
     option_type: OptionKind,
 ) -> GreekVector:
-    """Return the standard Black-Scholes Greeks for one contract."""
+    """Return Black-Scholes Greeks for one contract.
+
+    Theta is annualized and negative for long options under the usual decay convention.
+    """
 
     if time_to_expiry <= 0 or volatility <= 0:
         intrinsic_delta = 1.0 if (option_type == OptionKind.CALL and spot > strike) else 0.0
@@ -180,7 +183,9 @@ def corrado_su_price(
     if time_to_expiry <= 0 or volatility <= 0:
         return _intrinsic_value(spot, strike, option_type)
 
-    bs_value = black_scholes_price(
+    # The Corrado-Su expansion is written for calls, so we price the call-adjusted leg
+    # and then use put-call parity to recover the put value when requested.
+    call_bs_value = black_scholes_price(
         spot=spot,
         strike=strike,
         time_to_expiry=time_to_expiry,
@@ -215,7 +220,7 @@ def corrado_su_price(
         * _pdf(d)
         / (24.0 * (1.0 + w))
     )
-    call_value = max(bs_value + skewness * q3 + (kurtosis - 3.0) * q4, 0.0)
+    call_value = max(call_bs_value + skewness * q3 + (kurtosis - 3.0) * q4, 0.0)
     if option_type == OptionKind.CALL:
         return call_value
     parity_leg = spot * exp(-dividend_yield * time_to_expiry) - strike * exp(
@@ -226,7 +231,7 @@ def corrado_su_price(
 
 def annualized_realized_volatility(
     returns: Iterable[float],
-    annualization: int = 252,
+    annualization: int = int(TRADING_DAYS_PER_YEAR),
 ) -> float:
     """Compute annualized realized volatility from log returns."""
 
@@ -242,7 +247,7 @@ def garch11_forecast_volatility(
     omega: float = 1e-6,
     alpha: float = 0.08,
     beta: float = 0.90,
-    annualization: int = 252,
+    annualization: int = int(TRADING_DAYS_PER_YEAR),
 ) -> float:
     """A lightweight GARCH(1,1) volatility forecast."""
 

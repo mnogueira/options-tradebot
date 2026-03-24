@@ -2,8 +2,10 @@
 
 from options_tradebot.config.settings import (
     AppSettings,
+    EnvironmentConfig,
     PaperTradingConfig,
     RiskConfig,
+    ScannerConfig,
     StrategyConfig,
     UniverseConfig,
     default_settings,
@@ -11,8 +13,10 @@ from options_tradebot.config.settings import (
 
 __all__ = [
     "AppSettings",
+    "EnvironmentConfig",
     "PaperTradingConfig",
     "RiskConfig",
+    "ScannerConfig",
     "StrategyConfig",
     "UniverseConfig",
     "default_settings",

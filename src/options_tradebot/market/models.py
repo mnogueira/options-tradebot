@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from math import exp
+from math import isnan
 
 import pandas as pd
+
+TRADING_DAYS_PER_YEAR = 252.0
 
 
 class OptionKind(StrEnum):
@@ -26,7 +29,10 @@ class UnderlyingType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GreekVector:
-    """Option Greeks per contract."""
+    """Option Greeks per contract.
+
+    Theta follows the standard long-option sign convention and is annualized.
+    """
 
     delta: float
     gamma: float
@@ -62,7 +68,9 @@ class OptionQuote:
     def mid(self) -> float:
         if self.bid > 0 and self.ask > 0:
             return (self.bid + self.ask) / 2.0
-        return self.last or max(self.bid, self.ask, 0.0)
+        if self.last is not None and self.last > 0:
+            return self.last
+        return float("nan")
 
     @property
     def spread(self) -> float:
@@ -71,7 +79,7 @@ class OptionQuote:
     @property
     def spread_pct(self) -> float:
         base = self.mid
-        if base <= 0:
+        if pd.isna(base) or base <= 0:
             return 1.0
         return self.spread / base
 
@@ -92,7 +100,7 @@ class OptionSnapshot:
     @property
     def time_to_expiry(self) -> float:
         days = max((pd.Timestamp(self.contract.expiry).date() - pd.Timestamp(self.timestamp).date()).days, 0)
-        return days / 365.0
+        return days / TRADING_DAYS_PER_YEAR
 
     @property
     def time_to_expiry_years(self) -> float:
@@ -108,15 +116,22 @@ class OptionSnapshot:
 
     @property
     def mid_price(self) -> float:
-        return self.quote.mid
+        mid = self.quote.mid
+        return 0.0 if pd.isna(mid) else mid
 
     @property
     def ask_price(self) -> float:
-        return self.quote.ask if self.quote.ask > 0 else self.quote.mid
+        if self.quote.ask > 0:
+            return self.quote.ask
+        mid = self.quote.mid
+        return 0.0 if pd.isna(mid) else mid
 
     @property
     def bid_price(self) -> float:
-        return self.quote.bid if self.quote.bid > 0 else self.quote.mid
+        if self.quote.bid > 0:
+            return self.quote.bid
+        mid = self.quote.mid
+        return 0.0 if pd.isna(mid) else mid
 
     @property
     def premium_per_contract_ask(self) -> float:

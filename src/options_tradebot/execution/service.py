@@ -41,8 +41,16 @@ class PaperTradingService:
         self.broker = broker or PaperBroker(self.settings.paper.initial_cash)
         self.strategy = FairValueOptionsStrategy(self.settings)
         self.output_dir = output_dir or self.settings.paper.output_dir
+        self._peak_equity = self.broker.equity()
+        self._daily_anchor_date: object | None = None
+        self._daily_start_equity = self.broker.equity()
 
-    def run_once(self, snapshots: list[OptionSnapshot]) -> ServiceStepResult:
+    def run_once(
+        self,
+        snapshots: list[OptionSnapshot],
+        *,
+        underlying_histories: dict[str, pd.Series] | None = None,
+    ) -> ServiceStepResult:
         """Run one service step for the provided chain."""
 
         if not snapshots:
@@ -60,6 +68,9 @@ class PaperTradingService:
         closed_trades = tuple(
             self.broker.evaluate_exits(live_snapshots, self.settings.strategy.force_exit_dte)
         )
+        current_equity = self.broker.equity()
+        self._update_risk_anchors(pd.Timestamp(timestamp).date(), current_equity)
+        circuit_breaker = self._circuit_breaker_reason(current_equity)
         best_signal = StrategySignal(
             action="HOLD",
             contract_symbol=None,
@@ -70,33 +81,43 @@ class PaperTradingService:
             stop_price=None,
             fair_value=None,
             fair_volatility=None,
-            reason="no_signal",
+            greeks=None,
+            reason=circuit_breaker or "no_signal",
             score=0.0,
         )
-        for underlying, chain in by_underlying.items():
-            if (
-                self.broker.has_underlying_position(underlying)
-                and not self.settings.paper.allow_same_underlying_overlap
-            ):
-                continue
-            surface, _ = calibrate_surface(chain)
-            history = _underlying_history_from_chain(
-                [
-                    snapshot
-                    for snapshot in snapshots
-                    if snapshot.contract.underlying == underlying
-                ]
-            )
-            aggregate_greeks = self.aggregate_greeks()
-            signal = self.strategy.select_signal(
-                chain=chain,
-                underlying_history=history,
-                account_equity=self.broker.equity(),
-                current_portfolio_greeks=aggregate_greeks,
-                surface=surface,
-            )
-            if signal.score > best_signal.score:
-                best_signal = signal
+        if circuit_breaker is None:
+            for underlying, chain in by_underlying.items():
+                if (
+                    self.broker.has_underlying_position(underlying)
+                    and not self.settings.paper.allow_same_underlying_overlap
+                ):
+                    continue
+                surface, _ = calibrate_surface(
+                    chain,
+                    method=self.settings.strategy.surface_method,
+                    min_points=self.settings.scanner.min_surface_points,
+                )
+                history = (
+                    underlying_histories.get(underlying)
+                    if underlying_histories is not None and underlying in underlying_histories
+                    else _underlying_history_from_chain(
+                        [
+                            snapshot
+                            for snapshot in snapshots
+                            if snapshot.contract.underlying == underlying
+                        ]
+                    )
+                )
+                aggregate_greeks = self.aggregate_greeks()
+                signal = self.strategy.select_signal(
+                    chain=chain,
+                    underlying_history=history,
+                    account_equity=self.broker.equity(),
+                    current_portfolio_greeks=aggregate_greeks,
+                    surface=surface,
+                )
+                if signal.score > best_signal.score:
+                    best_signal = signal
         opened = False
         if best_signal.action != "HOLD" and best_signal.contract_symbol is not None:
             snapshot_map = {snapshot.contract.symbol: snapshot for snapshot in live_snapshots}
@@ -112,7 +133,7 @@ class PaperTradingService:
         )
 
     def aggregate_greeks(self) -> GreekVector | None:
-        """Aggregate approximate portfolio Greeks from open positions."""
+        """Aggregate marked portfolio Greeks from open positions."""
 
         if not self.broker.positions:
             return None
@@ -121,13 +142,28 @@ class PaperTradingService:
         vega = 0.0
         theta = 0.0
         for position in self.broker.positions.values():
-            notional = position.contracts * position.contract_multiplier
-            move_ratio = 0.5 if position.current_mark < position.entry_price else 0.8
-            delta += move_ratio * notional
-            gamma += 0.01 * position.contracts
-            vega += 5.0 * position.contracts
-            theta -= 1.0 * position.contracts
+            delta += position.current_greeks.delta
+            gamma += position.current_greeks.gamma
+            vega += position.current_greeks.vega
+            theta += position.current_greeks.theta
         return GreekVector(delta=delta, gamma=gamma, vega=vega, theta=theta)
+
+    def _update_risk_anchors(self, trade_date, current_equity: float) -> None:
+        if self._daily_anchor_date != trade_date:
+            self._daily_anchor_date = trade_date
+            self._daily_start_equity = current_equity
+        self._peak_equity = max(self._peak_equity, current_equity)
+
+    def _circuit_breaker_reason(self, current_equity: float) -> str | None:
+        if self._peak_equity > 0:
+            drawdown = (self._peak_equity - current_equity) / self._peak_equity
+            if drawdown >= self.settings.risk.max_portfolio_drawdown_pct:
+                return "max_portfolio_drawdown_breached"
+        if self._daily_start_equity > 0:
+            daily_loss = (self._daily_start_equity - current_equity) / self._daily_start_equity
+            if daily_loss >= self.settings.risk.max_daily_loss_pct:
+                return "max_daily_loss_breached"
+        return None
 
     def persist_step(
         self,
