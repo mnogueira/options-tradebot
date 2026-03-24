@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from math import log
+from math import exp, log
 from typing import Any, Callable, Iterable, Sequence
 
 import pandas as pd
@@ -231,6 +231,7 @@ class IBGatewayClient:
         max_strikes: int | None = None,
         max_contracts: int | None = None,
         moneyness_window: float | None = None,
+        underlying_price: float | None = None,
     ) -> list[Any]:
         """Build and qualify IB option contracts for a symbol."""
 
@@ -249,19 +250,23 @@ class IBGatewayClient:
             preferred_trading_class=trading_class,
         )
         underlying = self.qualify_equity(symbol, exchange=exchange, currency=currency)
-        underlying_price = self._snapshot_underlying_price(underlying)
+        resolved_underlying_price = (
+            float(underlying_price)
+            if underlying_price is not None and underlying_price > 0
+            else self._snapshot_underlying_price(underlying)
+        )
         selected_expirations = list(expirations or selected_chain.expirations)
         if max_expiries is not None:
             selected_expirations = selected_expirations[:max_expiries]
         selected_strikes = list(strikes or selected_chain.strikes)
-        if moneyness_window is not None and underlying_price > 0:
+        if moneyness_window is not None and resolved_underlying_price > 0:
             selected_strikes = [
                 value
                 for value in selected_strikes
-                if abs(log(max(float(value), 1e-8) / max(underlying_price, 1e-8))) <= moneyness_window
+                if abs(log(max(float(value), 1e-8) / max(resolved_underlying_price, 1e-8))) <= moneyness_window
             ]
-        if max_strikes is not None and underlying_price > 0 and len(selected_strikes) > max_strikes:
-            selected_strikes = _nearest_strikes(selected_strikes, reference=underlying_price, limit=max_strikes)
+        if max_strikes is not None and resolved_underlying_price > 0 and len(selected_strikes) > max_strikes:
+            selected_strikes = _nearest_strikes(selected_strikes, reference=resolved_underlying_price, limit=max_strikes)
         normalized_option_types = _normalize_option_types(option_types)
         contracts: list[Any] = []
         for expiry in selected_expirations:
@@ -464,7 +469,7 @@ class IBGatewayClient:
         max_expiries: int | None = None,
         max_strikes: int | None = None,
         max_contracts: int | None = None,
-        moneyness_window: float | None = 0.15,
+        moneyness_window: float | None = None,
         duration_str: str = "2 D",
         bar_size: str = "5 mins",
         what_to_show: str = "TRADES",
@@ -472,6 +477,16 @@ class IBGatewayClient:
     ) -> list[OptionSnapshot]:
         """Build current-ish option snapshots from IB historical bars when live quotes are unavailable."""
 
+        underlying = self.qualify_equity(symbol, exchange=exchange, currency=currency)
+        underlying_price = self._historical_market_price(
+            underlying,
+            duration_str=duration_str,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+        )
+        if underlying_price <= 0:
+            underlying_price = self._snapshot_underlying_price(underlying)
         contracts = self.build_option_contracts(
             symbol,
             exchange=exchange,
@@ -484,19 +499,10 @@ class IBGatewayClient:
             max_strikes=max_strikes,
             max_contracts=max_contracts,
             moneyness_window=moneyness_window,
+            underlying_price=underlying_price,
         )
         if not contracts:
             return []
-        underlying = self.qualify_equity(symbol, exchange=exchange, currency=currency)
-        underlying_price = self._historical_market_price(
-            underlying,
-            duration_str=duration_str,
-            bar_size=bar_size,
-            what_to_show=what_to_show,
-            use_rth=use_rth,
-        )
-        if underlying_price <= 0:
-            underlying_price = self._snapshot_underlying_price(underlying)
         snapshots: list[OptionSnapshot] = []
         for contract in contracts:
             bars = self._require_connected().reqHistoricalData(
@@ -530,6 +536,24 @@ class IBGatewayClient:
                 dividend_yield=self.config.dividend_yield,
                 option_type=option_type,
             )
+            if implied_vol is None:
+                lower_bound = _minimum_option_price(
+                    spot=underlying_price,
+                    strike=float(getattr(contract, "strike")),
+                    time_to_expiry=max((expiry - timestamp.date()).days, 0) / 252.0,
+                    rate=self.config.risk_free_rate,
+                    dividend_yield=self.config.dividend_yield,
+                    option_type=option_type,
+                )
+                implied_vol = implied_volatility(
+                    market_price=max(market_price, lower_bound + 1e-4),
+                    spot=underlying_price,
+                    strike=float(getattr(contract, "strike")),
+                    time_to_expiry=max((expiry - timestamp.date()).days, 0) / 252.0,
+                    rate=self.config.risk_free_rate,
+                    dividend_yield=self.config.dividend_yield,
+                    option_type=option_type,
+                )
             snapshots.append(
                 OptionSnapshot(
                     contract=OptionContract(
@@ -995,3 +1019,25 @@ def _safe_call(obj: Any, method_name: str, *, default: Any) -> Any:
     if method is None:
         return default
     return method()
+
+
+def _intrinsic_option_price(*, spot: float, strike: float, option_type: OptionKind) -> float:
+    if option_type == OptionKind.CALL:
+        return max(spot - strike, 0.0)
+    return max(strike - spot, 0.0)
+
+
+def _minimum_option_price(
+    *,
+    spot: float,
+    strike: float,
+    time_to_expiry: float,
+    rate: float,
+    dividend_yield: float,
+    option_type: OptionKind,
+) -> float:
+    discounted_spot = spot * exp(-dividend_yield * time_to_expiry)
+    discounted_strike = strike * exp(-rate * time_to_expiry)
+    if option_type == OptionKind.CALL:
+        return max(discounted_spot - discounted_strike, 0.0)
+    return max(discounted_strike - discounted_spot, 0.0)

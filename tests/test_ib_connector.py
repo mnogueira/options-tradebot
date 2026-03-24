@@ -238,6 +238,32 @@ class FakeIB:
         return []
 
 
+class PartialQualificationIB(FakeIB):
+    def qualifyContracts(self, *contracts):
+        qualified = super().qualifyContracts(*contracts)
+        return [qualified[0], None] if len(qualified) > 1 else qualified
+
+
+class HistoricalFallbackIB(FakeIB):
+    def reqTickers(self, *contracts):
+        return [FakeTicker(_market_price=0.0, last=None, bid=0.0, ask=0.0)]
+
+    def reqHistoricalData(self, *args, **kwargs):
+        return [
+            type(
+                "Bar",
+                (),
+                {
+                    "date": datetime(2026, 3, 24, 19, 0),
+                    "close": 19.71,
+                    "average": 19.69,
+                    "open": 19.55,
+                    "volume": 1250,
+                },
+            )()
+        ]
+
+
 class IBGatewayClientTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime = {
@@ -318,6 +344,29 @@ class IBGatewayClientTests(unittest.TestCase):
         self.assertEqual(fake_ib.last_contract.comboLegs[0].action, "SELL")
         self.assertEqual(fake_ib.last_contract.comboLegs[1].action, "BUY")
         self.assertAlmostEqual(fake_ib.last_order.lmtPrice, 0.22, places=6)
+
+    def test_build_option_contracts_ignores_none_qualification_results(self) -> None:
+        fake_ib = PartialQualificationIB()
+        with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
+            client = IBGatewayClient(IBGatewayConfig(), ib_factory=lambda: fake_ib)
+            client.connect()
+            contracts = client.build_option_contracts(
+                "PBR",
+                max_expiries=1,
+                max_strikes=2,
+                option_types=[OptionKind.CALL],
+            )
+        self.assertEqual(len(contracts), 1)
+        self.assertIsNotNone(contracts[0])
+
+    def test_snapshot_underlying_price_falls_back_to_history(self) -> None:
+        fake_ib = HistoricalFallbackIB()
+        with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
+            client = IBGatewayClient(IBGatewayConfig(), ib_factory=lambda: fake_ib)
+            client.connect()
+            stock = client.qualify_equity("PBR")
+            price = client._snapshot_underlying_price(stock)
+        self.assertAlmostEqual(price, 19.71, places=6)
 
     def test_fetch_option_snapshots_ignores_unqualified_contracts(self) -> None:
         class PartiallyQualifiedIB(FakeIB):

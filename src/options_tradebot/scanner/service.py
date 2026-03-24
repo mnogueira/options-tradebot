@@ -470,6 +470,11 @@ class MispricingScanner:
         array = np.asarray(values, dtype=float)
         if array.size == 0:
             return []
+        finite_mask = np.isfinite(array)
+        if not finite_mask.any():
+            return [0.0 for _ in values]
+        fill_value = float(np.median(array[finite_mask]))
+        array = np.where(finite_mask, array, fill_value)
         median = float(np.median(array))
         mad = float(np.median(np.abs(array - median)))
         scale = 1.4826 * mad
@@ -477,8 +482,10 @@ class MispricingScanner:
             std = float(np.std(array, ddof=1)) if array.size > 1 else 0.0
             if std <= 1e-9:
                 return [0.0 for _ in values]
-            return [float((value - float(np.mean(array))) / std) for value in array]
-        return [float((value - median) / scale) for value in array]
+            scores = [float((value - float(np.mean(array))) / std) for value in array]
+            return [0.0 if not np.isfinite(score) else score for score in scores]
+        scores = [float((value - median) / scale) for value in array]
+        return [0.0 if not np.isfinite(score) else score for score in scores]
 
     @staticmethod
     def _underlying_history(frame: pd.DataFrame) -> pd.Series:
