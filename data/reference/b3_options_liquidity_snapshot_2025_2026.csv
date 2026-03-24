@@ -1,0 +1,15 @@
+snapshot_date,scope,metric,symbol,value,unit,notes,source_url
+2025-01-31,weekly_options,market_share_contracts,BOVA11,34,pct,"Weekly options market share by contracts over the first twelve months of the program.",https://www.b3.com.br/pt_br/noticias/equities.htm
+2025-01-31,weekly_options,market_share_contracts,PETR4,28,pct,"Weekly options market share by contracts over the first twelve months of the program.",https://www.b3.com.br/pt_br/noticias/equities.htm
+2025-01-31,weekly_options,market_share_contracts,VALE3,11,pct,"Weekly options market share by contracts over the first twelve months of the program.",https://www.b3.com.br/pt_br/noticias/equities.htm
+2025-08-31,equity_options,adtv_underlying,BOVA11,206,BRL_mn,"Top 25 most traded options underlyings in the B3 Week Options Masterclass deck.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2025-08-31,equity_options,adtv_underlying,PETR4,117,BRL_mn,"Top 25 most traded options underlyings in the B3 Week Options Masterclass deck.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2025-08-31,equity_options,adtv_underlying,VALE3,82,BRL_mn,"Top 25 most traded options underlyings in the B3 Week Options Masterclass deck.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2025-08-31,equity_options,spread_top_book_monthly_top3,ALL,0.06,ratio,"Average top-of-book spread for the top-3 monthly names in Aug-2025.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2025-08-31,equity_options,spread_top_book_monthly_top5,ALL,0.09,ratio,"Average top-of-book spread for the top-5 monthly names in Aug-2025.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2025-08-31,equity_options,spread_top_book_weekly_top3,ALL,0.19,ratio,"Average top-of-book spread for the top-3 weekly names in Aug-2025.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2025-08-31,equity_options,spread_top_book_weekly_top5,ALL,0.29,ratio,"Average top-of-book spread for the top-5 weekly names in Aug-2025.",https://content.b3.com.br/wp-content/uploads/2025/09/B3-Week-Options-Masterclass-2.pdf
+2026-02-28,equity_options_market,adtv_monthly_options,ALL,1200,BRL_mn,"Record average daily turnover in monthly equity options in Feb-2026.",https://www.b3.com.br/pt_br/noticias/mercado-de-opcoes.htm
+2026-02-28,equity_options_market,adtv_weekly_options,ALL,138,BRL_mn,"Record average daily turnover in weekly equity options in Feb-2026.",https://www.b3.com.br/pt_br/noticias/mercado-de-opcoes.htm
+2026-02-28,equity_options_market,options_on_top_five_companies,ALL,78,pct,"Five companies represented 78% of equity options trading volume in Feb-2026.",https://www.b3.com.br/pt_br/noticias/mercado-de-opcoes.htm
+2026-02-28,equity_options_market,calls_share,ALL,59,pct,"Call options represented 59% of equity options turnover in Feb-2026.",https://www.b3.com.br/pt_br/noticias/mercado-de-opcoes.htm

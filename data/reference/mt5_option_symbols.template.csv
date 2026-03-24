@@ -1,0 +1,5 @@
+symbol,underlying,underlying_symbol,option_type,strike,expiry,underlying_type,contract_multiplier,dividend_yield,risk_free_rate
+REPLACE_WITH_MT5_SYMBOL_1,PETR4,PETR4,call,48.00,2026-04-17,spot,100,0.10,0.14
+REPLACE_WITH_MT5_SYMBOL_2,PETR4,PETR4,put,44.00,2026-04-17,spot,100,0.10,0.14
+REPLACE_WITH_MT5_SYMBOL_3,VALE3,VALE3,call,80.00,2026-04-17,spot,100,0.08,0.14
+REPLACE_WITH_MT5_SYMBOL_4,BOVA11,BOVA11,put,120.00,2026-04-17,spot,100,0.00,0.14
