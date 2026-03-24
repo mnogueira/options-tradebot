@@ -19,7 +19,7 @@ class IBGatewayConfig:
 
     host: str = "127.0.0.1"
     port: int = 4002
-    client_id: int = 7
+    client_id: int = 3
     timeout: float = 4.0
     market_data_type: int = 1
     account: str | None = None

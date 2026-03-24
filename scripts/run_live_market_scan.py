@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mt5-server")
     parser.add_argument("--ib-host", default="127.0.0.1")
     parser.add_argument("--ib-port", type=int, default=4002)
-    parser.add_argument("--ib-client-id", type=int, default=31)
+    parser.add_argument("--ib-client-id", type=int, default=3)
     parser.add_argument("--b3-dte-min", type=int, default=3)
     parser.add_argument("--b3-dte-max", type=int, default=25)
     parser.add_argument("--max-expiries-per-underlying", type=int, default=2)
