@@ -30,6 +30,7 @@ from options_tradebot.market import (
 from options_tradebot.risk.sizing import GreekLimits, size_option_position
 from options_tradebot.scanner import MispricingScanner, cross_market_findings_to_frame
 from options_tradebot.strategies import StrategySignal
+from options_tradebot.utils.polling import repeat_with_interval
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,11 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--history-bars", type=int, default=90)
     parser.add_argument("--paper-count", type=int, default=3)
     parser.add_argument("--selection-wait-seconds", type=float, default=1.5)
+    parser.add_argument("--poll-seconds", type=float, default=300.0)
+    parser.add_argument("--run-once", action="store_true")
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def run_scan(args: argparse.Namespace) -> dict[str, object]:
     settings = default_settings()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -185,7 +187,17 @@ def main() -> int:
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     print(json.dumps(summary, indent=2, default=str))
-    return 0
+    return summary
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return repeat_with_interval(
+        lambda: run_scan(args),
+        interval_seconds=args.poll_seconds,
+        run_once=args.run_once,
+        task_name="live market scan",
+    )
 
 
 def _option_findings_frame(scan_results) -> pd.DataFrame:
