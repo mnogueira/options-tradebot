@@ -40,11 +40,17 @@ class MispricingScanner:
         *,
         events: pd.DataFrame | None = None,
         top_n: int | None = None,
+        underlying_histories: dict[str, pd.Series] | None = None,
     ) -> list[UnderlyingScanResult]:
         """Scan an in-memory snapshot list."""
 
         frame = self._frame_from_snapshots(snapshots)
-        return self.scan_frame(frame, events=events, top_n=top_n)
+        return self.scan_frame(
+            frame,
+            events=events,
+            top_n=top_n,
+            underlying_histories=underlying_histories,
+        )
 
     def scan_cross_market_snapshots(
         self,
@@ -52,11 +58,17 @@ class MispricingScanner:
         *,
         events: pd.DataFrame | None = None,
         top_n: int | None = None,
+        underlying_histories: dict[str, pd.Series] | None = None,
     ) -> CrossMarketScanResult:
         """Scan all markets and attach explicit cross-market volatility opportunities."""
 
         frame = self._frame_from_snapshots(snapshots)
-        return self.scan_cross_market_frame(frame, events=events, top_n=top_n)
+        return self.scan_cross_market_frame(
+            frame,
+            events=events,
+            top_n=top_n,
+            underlying_histories=underlying_histories,
+        )
 
     def scan_cross_market_frame(
         self,
@@ -64,10 +76,16 @@ class MispricingScanner:
         *,
         events: pd.DataFrame | None = None,
         top_n: int | None = None,
+        underlying_histories: dict[str, pd.Series] | None = None,
     ) -> CrossMarketScanResult:
         """Scan a normalized multi-market frame and add relative-value vol-arb findings."""
 
-        rankings = self.scan_frame(frame, events=events, top_n=top_n)
+        rankings = self.scan_frame(
+            frame,
+            events=events,
+            top_n=top_n,
+            underlying_histories=underlying_histories,
+        )
         findings = self.find_cross_market_vol_arb_frame(frame)
         return CrossMarketScanResult(
             underlyings=tuple(rankings),
@@ -80,6 +98,7 @@ class MispricingScanner:
         *,
         events: pd.DataFrame | None = None,
         top_n: int | None = None,
+        underlying_histories: dict[str, pd.Series] | None = None,
     ) -> list[UnderlyingScanResult]:
         """Scan a normalized option snapshot frame."""
 
@@ -117,7 +136,16 @@ class MispricingScanner:
 
             iv_series = self._atm_iv_series(underlying_frame)
             current_atm_iv = None if iv_series.empty else float(iv_series.iloc[-1])
-            underlying_history = self._underlying_history(underlying_frame)
+            external_history = (
+                None
+                if underlying_histories is None
+                else underlying_histories.get(underlying)
+            )
+            underlying_history = (
+                self._coerce_underlying_history(external_history)
+                if external_history is not None
+                else self._underlying_history(underlying_frame)
+            )
             realized_vol = self._realized_vol(underlying_history)
             iv_rank, iv_percentile = self._iv_rank_metrics(iv_series)
             skew_series = self._skew_series(underlying_frame)
@@ -460,6 +488,16 @@ class MispricingScanner:
             .sort_values("timestamp")
         )
         return pd.Series(history["underlying_price"].astype(float).values, index=history["timestamp"])
+
+    @staticmethod
+    def _coerce_underlying_history(history: pd.Series) -> pd.Series:
+        frame = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(history.index),
+                "underlying_price": pd.Series(history.values, dtype=float),
+            }
+        ).dropna(subset=["timestamp", "underlying_price"]).sort_values("timestamp")
+        return pd.Series(frame["underlying_price"].astype(float).values, index=frame["timestamp"])
 
     def _realized_vol(self, history: pd.Series) -> float:
         returns = np.log(history.astype(float)).diff().dropna().tail(

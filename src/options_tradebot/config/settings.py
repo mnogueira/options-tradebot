@@ -114,7 +114,7 @@ class EnvironmentConfig:
     mt5_server: str | None = None
     mt5_path: str | None = None
     ib_host: str = "127.0.0.1"
-    ib_port: int = 7497
+    ib_port: int = 4002
     ib_client_id: int = 7
     ib_account: str | None = None
     ib_market_data_type: int = 1
@@ -141,7 +141,7 @@ def default_settings() -> AppSettings:
     _load_dotenv()
     default_output_dir = "runtime/paper"
     default_ib_host = "127.0.0.1"
-    default_ib_port = 7497
+    default_ib_port = 4002
     default_ib_client_id = 7
     default_ib_market_data_type = 1
     default_mode = "paper"

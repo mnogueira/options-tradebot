@@ -76,7 +76,7 @@ python scripts/probe_mt5.py --mt5-path "C:\Program Files\MetaTrader 5 Terminal\t
 ### 2b. Probe IB Gateway
 
 ```powershell
-python -m options_tradebot.cli.main ib-probe --ib-host 127.0.0.1 --ib-port 7497
+python -m options_tradebot.cli.main ib-probe --ib-host 127.0.0.1 --ib-port 4002
 ```
 
 ### 3. Build an MT5 option mapping
@@ -114,7 +114,7 @@ python scripts/run_paper_trade.py --snapshots data/runtime/latest_option_snapsho
 
 ```powershell
 python -m options_tradebot.cli.main mt5-probe --mt5-path "C:\Program Files\MetaTrader 5 Terminal\terminal64.exe"
-python -m options_tradebot.cli.main ib-probe --ib-host 127.0.0.1 --ib-port 7497
+python -m options_tradebot.cli.main ib-probe --ib-host 127.0.0.1 --ib-port 4002
 python -m options_tradebot.cli.main research-summary --snapshots data/runtime/latest_option_snapshots.csv
 python -m options_tradebot.cli.main backtest --snapshots data/runtime/latest_option_snapshots.csv
 python -m options_tradebot.cli.main paper --snapshots data/runtime/latest_option_snapshots.csv

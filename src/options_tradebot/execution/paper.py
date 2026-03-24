@@ -1,4 +1,4 @@
-"""Paper broker for long-premium option trading."""
+"""Paper broker for long and short single-leg option paper trading."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ class PaperPosition:
 
     symbol: str
     underlying: str
+    side: str
     contracts: int
     entry_date: date
     entry_price: float
@@ -31,7 +32,8 @@ class PaperPosition:
 
     @property
     def market_value(self) -> float:
-        return self.current_mark * self.contract_multiplier * self.contracts
+        direction = 1.0 if self.side.upper() == "LONG" else -1.0
+        return direction * self.current_mark * self.contract_multiplier * self.contracts
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +52,7 @@ class PaperTrade:
 
 
 class PaperBroker:
-    """Long-only premium broker with simple journaling."""
+    """Single-leg option paper broker with simple journaling."""
 
     def __init__(self, initial_cash: float):
         self.initial_cash = float(initial_cash)
@@ -62,21 +64,27 @@ class PaperBroker:
         return any(position.underlying == underlying for position in self.positions.values())
 
     def open_position(self, signal: StrategySignal, snapshot: OptionSnapshot) -> bool:
-        """Open a long option position if enough cash exists."""
+        """Open a long or short option position when the signal is valid."""
 
         if signal.contract_symbol is None or signal.entry_price is None or signal.contracts <= 0:
             return False
+        is_short = signal.action.upper().startswith("SELL_")
+        side = "SHORT" if is_short else "LONG"
         total_cost = signal.entry_price * snapshot.contract.contract_multiplier * signal.contracts
-        if total_cost > self.cash:
+        if not is_short and total_cost > self.cash:
             return False
-        self.cash -= total_cost
+        if is_short:
+            self.cash += total_cost
+        else:
+            self.cash -= total_cost
         current_greeks = _scale_greeks(
             signal.greeks or _snapshot_greeks(snapshot, implied_vol=signal.fair_volatility),
-            factor=snapshot.contract.contract_multiplier * signal.contracts,
+            factor=snapshot.contract.contract_multiplier * signal.contracts * (-1 if is_short else 1),
         )
         self.positions[signal.contract_symbol] = PaperPosition(
             symbol=snapshot.contract.symbol,
             underlying=snapshot.contract.underlying,
+            side=side,
             contracts=signal.contracts,
             entry_date=snapshot.timestamp,
             entry_price=signal.entry_price,
@@ -101,6 +109,7 @@ class PaperBroker:
             self.positions[symbol] = PaperPosition(
                 symbol=position.symbol,
                 underlying=position.underlying,
+                side=position.side,
                 contracts=position.contracts,
                 entry_date=position.entry_date,
                 entry_price=position.entry_price,
@@ -111,7 +120,7 @@ class PaperBroker:
                 contract_multiplier=position.contract_multiplier,
                 current_greeks=_scale_greeks(
                     _snapshot_greeks(snapshot),
-                    factor=position.contract_multiplier * position.contracts,
+                    factor=position.contract_multiplier * position.contracts * (-1 if position.side.upper() == "SHORT" else 1),
                 ),
                 strategy_reason=position.strategy_reason,
             )
@@ -125,23 +134,38 @@ class PaperBroker:
             snapshot = snapshot_map.get(symbol)
             if snapshot is None:
                 continue
-            if snapshot.bid_price >= position.target_price:
-                closed.append(self.close_position(snapshot, "target"))
-            elif snapshot.bid_price <= position.stop_price:
-                closed.append(self.close_position(snapshot, "stop"))
-            elif snapshot.dte <= force_exit_dte:
-                closed.append(self.close_position(snapshot, "expiry_window"))
+            if position.side.upper() == "SHORT":
+                if snapshot.ask_price <= position.target_price:
+                    closed.append(self.close_position(snapshot, "target"))
+                elif snapshot.ask_price >= position.stop_price:
+                    closed.append(self.close_position(snapshot, "stop"))
+                elif snapshot.dte <= force_exit_dte:
+                    closed.append(self.close_position(snapshot, "expiry_window"))
+            else:
+                if snapshot.bid_price >= position.target_price:
+                    closed.append(self.close_position(snapshot, "target"))
+                elif snapshot.bid_price <= position.stop_price:
+                    closed.append(self.close_position(snapshot, "stop"))
+                elif snapshot.dte <= force_exit_dte:
+                    closed.append(self.close_position(snapshot, "expiry_window"))
         return closed
 
     def close_position(self, snapshot: OptionSnapshot, exit_reason: str) -> PaperTrade:
         """Close an open position."""
 
         position = self.positions.pop(snapshot.contract.symbol)
-        exit_price = snapshot.bid_price
-        proceeds = exit_price * position.contract_multiplier * position.contracts
-        self.cash += proceeds
-        entry_cost = position.entry_price * position.contract_multiplier * position.contracts
-        pnl = proceeds - entry_cost
+        if position.side.upper() == "SHORT":
+            exit_price = snapshot.ask_price
+            cover_cost = exit_price * position.contract_multiplier * position.contracts
+            self.cash -= cover_cost
+            entry_credit = position.entry_price * position.contract_multiplier * position.contracts
+            pnl = entry_credit - cover_cost
+        else:
+            exit_price = snapshot.bid_price
+            proceeds = exit_price * position.contract_multiplier * position.contracts
+            self.cash += proceeds
+            entry_cost = position.entry_price * position.contract_multiplier * position.contracts
+            pnl = proceeds - entry_cost
         trade = PaperTrade(
             symbol=position.symbol,
             underlying=position.underlying,

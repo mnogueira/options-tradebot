@@ -138,6 +138,16 @@ class FakeTrade:
     orderStatus: FakeOrderStatus
 
 
+@dataclass
+class FakeBar:
+    date: object
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+
+
 class FakeIB:
     def __init__(self):
         self.connected = False
@@ -244,7 +254,7 @@ class IBGatewayClientTests(unittest.TestCase):
         fake_ib = FakeIB()
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
             client = IBGatewayClient(
-                IBGatewayConfig(port=7497, risk_free_rate=0.045),
+                IBGatewayConfig(port=4002, risk_free_rate=0.045),
                 ib_factory=lambda: fake_ib,
             )
             client.connect()
@@ -308,3 +318,66 @@ class IBGatewayClientTests(unittest.TestCase):
         self.assertEqual(fake_ib.last_contract.comboLegs[0].action, "SELL")
         self.assertEqual(fake_ib.last_contract.comboLegs[1].action, "BUY")
         self.assertAlmostEqual(fake_ib.last_order.lmtPrice, 0.22, places=6)
+
+    def test_fetch_option_snapshots_ignores_unqualified_contracts(self) -> None:
+        class PartiallyQualifiedIB(FakeIB):
+            def qualifyContracts(self, *contracts):
+                qualified = super().qualifyContracts(*contracts)
+                return [contract if getattr(contract, "right", "C") == "C" else None for contract in qualified]
+
+        fake_ib = PartiallyQualifiedIB()
+        with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
+            client = IBGatewayClient(IBGatewayConfig(port=4002), ib_factory=lambda: fake_ib)
+            client.connect()
+            snapshots = client.fetch_option_snapshots(
+                "PBR",
+                max_expiries=1,
+                max_strikes=1,
+            )
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].contract.option_type, OptionKind.CALL)
+
+    def test_fetch_option_history_snapshots_uses_historical_bars(self) -> None:
+        class HistoricalIB(FakeIB):
+            def reqTickers(self, *contracts):
+                return [FakeTicker(_market_price=0.0, last=0.0, bid=0.0, ask=0.0)]
+
+            def reqHistoricalData(self, contract, *args, **kwargs):
+                if getattr(contract, "secType", "") == "STK":
+                    return [
+                        FakeBar(
+                            date=datetime(2026, 3, 24, 17, 45),
+                            open=19.50,
+                            high=19.80,
+                            low=19.40,
+                            close=19.71,
+                            volume=1000.0,
+                        )
+                    ]
+                return [
+                    FakeBar(
+                        date=datetime(2026, 3, 24, 17, 45),
+                        open=0.22,
+                        high=0.24,
+                        low=0.21,
+                        close=0.23,
+                        volume=25.0,
+                    )
+                ]
+
+        fake_ib = HistoricalIB()
+        with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
+            client = IBGatewayClient(IBGatewayConfig(port=4002, risk_free_rate=0.045), ib_factory=lambda: fake_ib)
+            client.connect()
+            snapshots = client.fetch_option_history_snapshots(
+                "PBR",
+                max_expiries=1,
+                max_strikes=1,
+                option_types=[OptionKind.CALL],
+            )
+        self.assertEqual(len(snapshots), 1)
+        snapshot = snapshots[0]
+        self.assertAlmostEqual(snapshot.underlying_price, 19.71, places=6)
+        self.assertAlmostEqual(snapshot.quote.last or 0.0, 0.23, places=6)
+        self.assertEqual(snapshot.market, "US")
+        self.assertIsNotNone(snapshot.implied_vol)

@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Sequence
 import pandas as pd
 
 from options_tradebot.market.models import GreekVector, OptionContract, OptionKind, OptionQuote, OptionSnapshot
+from options_tradebot.market.pricing import implied_volatility
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +18,7 @@ class IBGatewayConfig:
     """Connection and market-data settings for IB Gateway."""
 
     host: str = "127.0.0.1"
-    port: int = 7497
+    port: int = 4002
     client_id: int = 7
     timeout: float = 4.0
     market_data_type: int = 1
@@ -285,7 +286,11 @@ class IBGatewayClient:
         for chunk in _chunked(contracts, self.config.qualify_chunk_size):
             result = self._require_connected().qualifyContracts(*chunk)
             if result:
-                qualified.extend(list(result))
+                qualified.extend(
+                    contract
+                    for contract in result
+                    if contract is not None and getattr(contract, "secType", None) is not None
+                )
         return qualified
 
     def fetch_option_snapshots(
@@ -446,6 +451,118 @@ class IBGatewayClient:
             frame["underlying"] = getattr(ib_contract, "symbol", "")
         return frame
 
+    def fetch_option_history_snapshots(
+        self,
+        symbol: str,
+        *,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        trading_class: str | None = None,
+        expirations: Sequence[date] | None = None,
+        strikes: Sequence[float] | None = None,
+        option_types: Sequence[OptionKind | str] | None = None,
+        max_expiries: int | None = None,
+        max_strikes: int | None = None,
+        max_contracts: int | None = None,
+        moneyness_window: float | None = 0.15,
+        duration_str: str = "2 D",
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = True,
+    ) -> list[OptionSnapshot]:
+        """Build current-ish option snapshots from IB historical bars when live quotes are unavailable."""
+
+        contracts = self.build_option_contracts(
+            symbol,
+            exchange=exchange,
+            currency=currency,
+            trading_class=trading_class,
+            expirations=expirations,
+            strikes=strikes,
+            option_types=option_types,
+            max_expiries=max_expiries,
+            max_strikes=max_strikes,
+            max_contracts=max_contracts,
+            moneyness_window=moneyness_window,
+        )
+        if not contracts:
+            return []
+        underlying = self.qualify_equity(symbol, exchange=exchange, currency=currency)
+        underlying_price = self._historical_market_price(
+            underlying,
+            duration_str=duration_str,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+        )
+        if underlying_price <= 0:
+            underlying_price = self._snapshot_underlying_price(underlying)
+        snapshots: list[OptionSnapshot] = []
+        for contract in contracts:
+            bars = self._require_connected().reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr=duration_str,
+                barSizeSetting=bar_size,
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+                formatDate=2,
+                keepUpToDate=False,
+                chartOptions=[],
+                timeout=max(self.config.timeout, 1.0) * 10.0,
+            )
+            if not bars:
+                continue
+            last_bar = bars[-1]
+            market_price = float(getattr(last_bar, "close", 0.0) or 0.0)
+            if market_price <= 0:
+                continue
+            expiry = _parse_ib_expiry(getattr(contract, "lastTradeDateOrContractMonth"))
+            timestamp = pd.Timestamp(getattr(last_bar, "date", datetime.now(UTC)))
+            timestamp = timestamp.tz_localize(UTC) if timestamp.tzinfo is None else timestamp.tz_convert(UTC)
+            option_type = OptionKind.CALL if str(getattr(contract, "right", "")).upper().startswith("C") else OptionKind.PUT
+            implied_vol = implied_volatility(
+                market_price=market_price,
+                spot=underlying_price,
+                strike=float(getattr(contract, "strike")),
+                time_to_expiry=max((expiry - timestamp.date()).days, 0) / 252.0,
+                rate=self.config.risk_free_rate,
+                dividend_yield=self.config.dividend_yield,
+                option_type=option_type,
+            )
+            snapshots.append(
+                OptionSnapshot(
+                    contract=OptionContract(
+                        symbol=str(getattr(contract, "localSymbol", getattr(contract, "symbol", ""))),
+                        underlying=str(getattr(contract, "symbol", "")),
+                        option_type=option_type,
+                        strike=float(getattr(contract, "strike")),
+                        expiry=expiry,
+                        contract_multiplier=int(float(getattr(contract, "multiplier", 100) or 100)),
+                        exercise_style="american",
+                        exchange=str(getattr(contract, "exchange", "") or exchange),
+                        currency=str(getattr(contract, "currency", currency) or currency),
+                        contract_id=int(getattr(contract, "conId", 0) or 0),
+                        local_symbol=str(getattr(contract, "localSymbol", getattr(contract, "symbol", ""))),
+                        trading_class=str(getattr(contract, "tradingClass", "") or getattr(contract, "symbol", "")),
+                    ),
+                    quote=OptionQuote(
+                        bid=market_price,
+                        ask=market_price,
+                        last=market_price,
+                        volume=int(float(getattr(last_bar, "volume", 0.0) or 0.0)),
+                        open_interest=None,
+                    ),
+                    timestamp=timestamp.date(),
+                    underlying_price=underlying_price,
+                    risk_free_rate=self.config.risk_free_rate,
+                    dividend_yield=self.config.dividend_yield,
+                    implied_vol=implied_vol,
+                    market="US",
+                )
+            )
+        return snapshots
+
     def place_option_order(
         self,
         contract: OptionContract | OptionSnapshot,
@@ -574,7 +691,46 @@ class IBGatewayClient:
         ib = self._require_connected()
         tickers = ib.reqTickers(contract)
         ticker = tickers[0] if tickers else None
-        return _ticker_market_price(ticker)
+        price = _ticker_market_price(ticker)
+        if price > 0:
+            return price
+        return self._historical_market_price(
+            contract,
+            duration_str="5 D",
+            bar_size="1 day",
+            what_to_show="TRADES",
+            use_rth=True,
+        )
+
+    def _historical_market_price(
+        self,
+        contract: Any,
+        *,
+        duration_str: str,
+        bar_size: str,
+        what_to_show: str,
+        use_rth: bool,
+    ) -> float:
+        bars = self._require_connected().reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
+            formatDate=2,
+            keepUpToDate=False,
+            chartOptions=[],
+            timeout=max(self.config.timeout, 1.0) * 10.0,
+        )
+        if not bars:
+            return 0.0
+        last_bar = bars[-1]
+        for field in ("close", "average", "open"):
+            value = getattr(last_bar, field, None)
+            if value is not None and float(value) > 0:
+                return float(value)
+        return 0.0
 
     def _option_snapshot_from_market_data(
         self,

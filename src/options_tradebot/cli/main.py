@@ -112,3 +112,7 @@ def main() -> int:
 
     parser.error(f"Unsupported command: {args.command}")
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
