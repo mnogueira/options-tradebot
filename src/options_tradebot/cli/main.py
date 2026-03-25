@@ -1,62 +1,51 @@
-"""CLI entry point for the project."""
+"""CLI entry point for the defined-risk short-vol runtime."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
-from options_tradebot.config import default_settings
+from options_tradebot.config import load_short_vol_config
 from options_tradebot.connectors.ib import IBGatewayClient, IBGatewayConfig
-from options_tradebot.data import MT5ConnectionConfig, MT5MarketDataClient, load_snapshot_csv
-from options_tradebot.data.models import snapshots_from_frame
-from options_tradebot.execution import PaperTradingService
-from options_tradebot.research import OptionBacktester, summarize_liquidity
+from options_tradebot.data import MT5ConnectionConfig, MT5MarketDataClient
+from options_tradebot.runtime import DefinedRiskShortVolRuntime, bootstrap_runtime_config
+from options_tradebot.utils.polling import repeat_with_interval
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Brazilian options tradebot utilities.")
+    parser = argparse.ArgumentParser(description="Defined-risk short-vol runtime utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    probe = subparsers.add_parser("mt5-probe", help="Probe the MT5 terminal connection.")
-    probe.add_argument("--mt5-path")
-    probe.add_argument("--mt5-login", type=int)
-    probe.add_argument("--mt5-password")
-    probe.add_argument("--mt5-server")
+    mt5_probe = subparsers.add_parser("mt5-probe", help="Probe one MT5 endpoint from the canonical config.")
+    mt5_probe.add_argument("--config", default="config/defined_risk_short_vol.toml")
+    mt5_probe.add_argument("--target", choices=["data", "paper", "live"], default="data")
 
-    ib_probe = subparsers.add_parser("ib-probe", help="Probe the IB Gateway paper account connection.")
-    ib_probe.add_argument("--ib-host")
-    ib_probe.add_argument("--ib-port", type=int)
-    ib_probe.add_argument("--ib-client-id", type=int)
-    ib_probe.add_argument("--ib-account")
-    ib_probe.add_argument("--ib-market-data-type", type=int)
+    ib_probe = subparsers.add_parser("ib-probe", help="Probe one IB endpoint from the canonical config.")
+    ib_probe.add_argument("--config", default="config/defined_risk_short_vol.toml")
+    ib_probe.add_argument("--target", choices=["data", "paper", "live"], default="data")
 
-    research = subparsers.add_parser("research-summary", help="Summarize an options snapshot CSV.")
-    research.add_argument("--snapshots", required=True)
-
-    backtest = subparsers.add_parser("backtest", help="Run a backtest over a snapshot CSV.")
-    backtest.add_argument("--snapshots", required=True)
-    backtest.add_argument("--output-dir")
-
-    paper = subparsers.add_parser("paper", help="Run a single paper-trading step.")
-    paper.add_argument("--snapshots", required=True)
-    paper.add_argument("--output-dir")
+    run_short_vol = subparsers.add_parser("run-short-vol", help="Run the unified defined-risk short-vol runtime.")
+    run_short_vol.add_argument("--config", default="config/defined_risk_short_vol.toml")
+    run_short_vol.add_argument("--mode", choices=["sim", "paper-broker", "live"])
+    run_short_vol.add_argument("--venues")
+    run_short_vol.add_argument("--run-once", action="store_true")
 
     return parser
 
 
 def main() -> int:
-    settings = default_settings()
     parser = build_parser()
     args = parser.parse_args()
 
     if args.command == "mt5-probe":
+        config = load_short_vol_config(args.config)
+        endpoint = getattr(config.venues.mt5, args.target)
         client = MT5MarketDataClient(
             MT5ConnectionConfig(
-                path=args.mt5_path or settings.environment.mt5_path,
-                login=args.mt5_login or settings.environment.mt5_login,
-                password=args.mt5_password or settings.environment.mt5_password,
-                server=args.mt5_server or settings.environment.mt5_server,
+                path=endpoint.path,
+                login=endpoint.login,
+                password=endpoint.password,
+                server=endpoint.server,
             )
         )
         try:
@@ -66,23 +55,21 @@ def main() -> int:
         finally:
             client.shutdown()
 
-    if args.command == "research-summary":
-        frame = load_snapshot_csv(args.snapshots)
-        summary = summarize_liquidity(frame)
-        print(summary.to_string(index=False))
-        return 0
-
     if args.command == "ib-probe":
+        config = load_short_vol_config(args.config)
+        data_endpoint = config.venues.ib.data
+        execution_target = config.venues.ib.paper if args.target == "paper" else config.venues.ib.live
         client = IBGatewayClient(
             IBGatewayConfig(
-                host=args.ib_host or settings.environment.ib_host,
-                port=args.ib_port or settings.environment.ib_port,
-                client_id=args.ib_client_id or settings.environment.ib_client_id,
-                account=args.ib_account or settings.environment.ib_account,
-                market_data_type=(
-                    args.ib_market_data_type or settings.environment.ib_market_data_type
-                ),
-                risk_free_rate=settings.default_usd_risk_free_rate,
+                host=data_endpoint.host,
+                data_port=data_endpoint.port,
+                data_client_id=data_endpoint.client_id,
+                execution_port=execution_target.port,
+                execution_client_id=execution_target.client_id,
+                account=execution_target.account or data_endpoint.account,
+                market_data_type=data_endpoint.market_data_type,
+                risk_free_rate=config.pricing.usd_risk_free_rate,
+                read_only_data_only=args.target == "data",
             )
         )
         try:
@@ -92,23 +79,25 @@ def main() -> int:
         finally:
             client.disconnect()
 
-    if args.command == "backtest":
-        frame = load_snapshot_csv(args.snapshots)
-        output_dir = args.output_dir or "runtime/backtest"
-        result = OptionBacktester(settings).run(frame, output_dir=output_dir)
-        print(json.dumps(result.summary(), indent=2))
-        print(Path(output_dir).resolve())
-        return 0
+    if args.command == "run-short-vol":
+        config = bootstrap_runtime_config(
+            config_path=args.config,
+            mode=args.mode,
+            venues=tuple(value.strip() for value in args.venues.split(",")) if args.venues else None,
+            run_once=True if args.run_once else None,
+        )
+        runtime = DefinedRiskShortVolRuntime(config)
 
-    if args.command == "paper":
-        frame = load_snapshot_csv(args.snapshots)
-        snapshots = snapshots_from_frame(frame)
-        output_dir = args.output_dir or settings.paper.output_dir
-        service = PaperTradingService(settings=settings, output_dir=output_dir)
-        result = service.run_once(snapshots)
-        print(json.dumps({"equity": result.equity, "signal": result.signal.action}, indent=2))
-        print(result.state_path)
-        return 0
+        def task() -> None:
+            summary = runtime.run_cycle()
+            print(json.dumps(summary, indent=2))
+
+        return repeat_with_interval(
+            task,
+            interval_seconds=config.runtime.poll_seconds,
+            run_once=config.runtime.run_once,
+            task_name="defined-risk short-vol runtime",
+        )
 
     parser.error(f"Unsupported command: {args.command}")
     return 1

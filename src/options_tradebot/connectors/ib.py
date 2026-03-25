@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from math import exp, log
 from typing import Any, Callable, Iterable, Sequence
 
@@ -18,8 +18,12 @@ class IBGatewayConfig:
     """Connection and market-data settings for IB Gateway."""
 
     host: str = "127.0.0.1"
-    port: int = 4002
-    client_id: int = 3
+    data_port: int = 4001
+    data_client_id: int = 3
+    execution_port: int = 4002
+    execution_client_id: int = 13
+    port: int | None = None
+    client_id: int | None = None
     timeout: float = 4.0
     market_data_type: int = 1
     account: str | None = None
@@ -30,6 +34,24 @@ class IBGatewayConfig:
     risk_free_rate: float = 0.045
     dividend_yield: float = 0.0
     generic_ticks: str = "100,101,104,106,221,233"
+    read_only_data_only: bool = False
+    news_provider_names: tuple[str, ...] = ("Benzinga", "Dow Jones")
+
+    @property
+    def resolved_data_port(self) -> int:
+        return int(self.port if self.port is not None else self.data_port)
+
+    @property
+    def resolved_data_client_id(self) -> int:
+        return int(self.client_id if self.client_id is not None else self.data_client_id)
+
+    @property
+    def resolved_execution_port(self) -> int:
+        return int(self.execution_port)
+
+    @property
+    def resolved_execution_client_id(self) -> int:
+        return int(self.execution_client_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +133,30 @@ class IBPositionSnapshot:
     snapshot: OptionSnapshot | None
 
 
+@dataclass(frozen=True, slots=True)
+class IBNewsHeadline:
+    """One IB news headline tied to an underlying symbol."""
+
+    symbol: str
+    provider_code: str
+    provider_name: str | None
+    article_id: str
+    headline: str
+    published_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IBNewsSentiment:
+    """A lightweight sentiment aggregate derived from recent headlines."""
+
+    symbol: str
+    score: float
+    label: str
+    headline_count: int
+    extreme: bool
+    headlines: tuple[IBNewsHeadline, ...]
+
+
 class IBGatewayClient:
     """Synchronous IB Gateway helper built on ib_async's blocking interface."""
 
@@ -123,30 +169,56 @@ class IBGatewayClient:
         self.config = config or IBGatewayConfig()
         self._ib_factory = ib_factory or self._default_ib_factory
         self._ib: Any | None = None
+        self._execution_ib: Any | None = None
         self._connected = False
 
     def connect(self) -> dict[str, object]:
         """Connect to IB Gateway and return account/session metadata."""
 
-        ib = self._ib_factory()
-        ib.connect(
-            self.config.host,
-            self.config.port,
-            clientId=self.config.client_id,
-            timeout=self.config.timeout,
+        data_ib = self._ib_factory()
+        self._connect_session(
+            data_ib,
+            port=self.config.resolved_data_port,
+            client_id=self.config.resolved_data_client_id,
+            readonly=True,
+            fetch_none=True,
         )
-        self._ib = ib
+        self._ib = data_ib
+        self._execution_ib = None
         self._connected = True
-        if hasattr(ib, "reqMarketDataType"):
-            ib.reqMarketDataType(self.config.market_data_type)
+        if hasattr(data_ib, "reqMarketDataType"):
+            data_ib.reqMarketDataType(self.config.market_data_type)
+        if not self.config.read_only_data_only:
+            if (
+                self.config.resolved_execution_port == self.config.resolved_data_port
+                and self.config.resolved_execution_client_id == self.config.resolved_data_client_id
+            ):
+                self._execution_ib = data_ib
+            else:
+                execution_ib = self._ib_factory()
+                self._connect_session(
+                    execution_ib,
+                    port=self.config.resolved_execution_port,
+                    client_id=self.config.resolved_execution_client_id,
+                    readonly=False,
+                    fetch_none=False,
+                )
+                self._execution_ib = execution_ib
         return self.account_snapshot()
 
     def disconnect(self) -> None:
         """Disconnect from IB Gateway."""
 
+        if (
+            self._execution_ib is not None
+            and self._execution_ib is not self._ib
+            and hasattr(self._execution_ib, "disconnect")
+        ):
+            self._execution_ib.disconnect()
         if self._ib is not None and hasattr(self._ib, "disconnect"):
             self._ib.disconnect()
         self._connected = False
+        self._execution_ib = None
         self._ib = None
 
     shutdown = disconnect
@@ -154,16 +226,26 @@ class IBGatewayClient:
     def account_snapshot(self) -> dict[str, object]:
         """Return a lightweight account summary for diagnostics."""
 
-        ib = self._require_connected()
-        managed_accounts = list(_safe_call(ib, "managedAccounts", default=[]))
         return {
             "host": self.config.host,
-            "port": self.config.port,
-            "client_id": self.config.client_id,
+            "data_port": self.config.resolved_data_port,
+            "data_client_id": self.config.resolved_data_client_id,
+            "execution_port": self.config.resolved_execution_port,
+            "execution_client_id": self.config.resolved_execution_client_id,
             "market_data_type": self.config.market_data_type,
-            "managed_accounts": managed_accounts,
             "configured_account": self.config.account,
-            "connected": bool(_safe_call(ib, "isConnected", default=True)),
+            "data_session": self._session_snapshot(
+                self._require_connected(),
+                port=self.config.resolved_data_port,
+                client_id=self.config.resolved_data_client_id,
+            ),
+            "execution_session": None
+            if self._execution_ib is None
+            else self._session_snapshot(
+                self._execution_ib,
+                port=self.config.resolved_execution_port,
+                client_id=self.config.resolved_execution_client_id,
+            ),
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
@@ -216,6 +298,40 @@ class IBGatewayClient:
                 )
             )
         return option_chains
+
+    def discover_optionable_underlyings(
+        self,
+        *,
+        locations: Sequence[str],
+        scan_codes: Sequence[str],
+        max_results: int,
+        instrument: str = "STK",
+    ) -> list[str]:
+        """Discover a dynamic IB underlying universe through scanner subscriptions."""
+
+        if max_results <= 0 or not locations or not scan_codes:
+            return []
+        runtime = _load_ib_async()
+        scanner_subscription_factory = runtime.get("ScannerSubscription")
+        if scanner_subscription_factory is None:
+            raise RuntimeError("ib_async ScannerSubscription support is required for IB universe discovery.")
+
+        ib = self._require_connected()
+        discovered: list[str] = []
+        for location in locations:
+            for scan_code in scan_codes:
+                subscription = scanner_subscription_factory(
+                    instrument=instrument,
+                    locationCode=location,
+                    scanCode=scan_code,
+                    numberOfRows=max_results,
+                )
+                rows = ib.reqScannerData(subscription, [], [])
+                for row in rows or []:
+                    symbol = _scanner_item_symbol(row)
+                    if symbol:
+                        discovered.append(symbol)
+        return sorted(dict.fromkeys(discovered))
 
     def build_option_contracts(
         self,
@@ -456,6 +572,52 @@ class IBGatewayClient:
             frame["underlying"] = getattr(ib_contract, "symbol", "")
         return frame
 
+    def fetch_underlying_history(
+        self,
+        symbol: str,
+        *,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        duration_str: str = "90 D",
+        bar_size: str = "1 day",
+        what_to_show: str = "TRADES",
+        use_rth: bool = True,
+    ) -> pd.DataFrame:
+        """Fetch historical bars for an underlying equity or ETF."""
+
+        ib = self._require_connected()
+        contract = self.qualify_equity(symbol, exchange=exchange, currency=currency)
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
+            formatDate=2,
+            keepUpToDate=False,
+            chartOptions=[],
+            timeout=max(self.config.timeout, 1.0) * 10.0,
+        )
+        rows = [
+            {
+                "date": getattr(bar, "date", None),
+                "open": getattr(bar, "open", None),
+                "high": getattr(bar, "high", None),
+                "low": getattr(bar, "low", None),
+                "close": getattr(bar, "close", None),
+                "volume": getattr(bar, "volume", None),
+                "average": getattr(bar, "average", None),
+                "bar_count": getattr(bar, "barCount", None),
+                "symbol": symbol,
+            }
+            for bar in bars or []
+        ]
+        frame = pd.DataFrame(rows)
+        if not frame.empty:
+            frame["date"] = pd.to_datetime(frame["date"], utc=True, errors="coerce")
+        return frame
+
     def fetch_option_history_snapshots(
         self,
         symbol: str,
@@ -592,11 +754,12 @@ class IBGatewayClient:
         contract: OptionContract | OptionSnapshot,
         request: IBOrderRequest,
     ) -> IBOrderReceipt:
-        """Place a single-leg option order."""
+        """Place a single-leg option order on the execution session."""
 
         ib_contract = self._resolve_option_contract(contract)
-        trade = self._require_connected().placeOrder(ib_contract, self._build_order(request))
-        self._require_connected().sleep(self.config.order_wait_seconds)
+        execution_ib = self._require_execution_connected()
+        trade = execution_ib.placeOrder(ib_contract, self._build_order(request))
+        execution_ib.sleep(self.config.order_wait_seconds)
         return _trade_to_receipt(
             trade,
             symbol=getattr(ib_contract, "localSymbol", getattr(ib_contract, "symbol", "")),
@@ -634,14 +797,15 @@ class IBGatewayClient:
             currency=currency,
         )
         combo_contract.comboLegs = resolved_legs
-        trade = self._require_connected().placeOrder(combo_contract, self._build_order(request))
-        self._require_connected().sleep(self.config.order_wait_seconds)
+        execution_ib = self._require_execution_connected()
+        trade = execution_ib.placeOrder(combo_contract, self._build_order(request))
+        execution_ib.sleep(self.config.order_wait_seconds)
         return _trade_to_receipt(trade, symbol=underlying_symbol, request=request)
 
     def positions_with_greeks(self) -> list[IBPositionSnapshot]:
         """Return live option positions with IB-provided Greeks."""
 
-        ib = self._require_connected()
+        ib = self._require_execution_connected()
         portfolio = {
             int(getattr(item.contract, "conId")): item
             for item in _safe_call(ib, "portfolio", default=[])
@@ -687,6 +851,100 @@ class IBGatewayClient:
                 )
             )
         return results
+
+    def news_providers(self) -> dict[str, str]:
+        """Return available IB news providers keyed by provider code."""
+
+        ib = self._require_connected()
+        providers = _safe_call(ib, "reqNewsProviders", default=[])
+        return {
+            str(getattr(provider, "code", "") or ""): str(getattr(provider, "name", "") or "")
+            for provider in providers or []
+            if str(getattr(provider, "code", "") or "").strip()
+        }
+
+    def fetch_news_headlines(
+        self,
+        symbol: str,
+        *,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        provider_names: Sequence[str] | None = None,
+        lookback_hours: int = 24,
+        max_results: int = 25,
+    ) -> list[IBNewsHeadline]:
+        """Fetch recent headlines from the configured IB news providers."""
+
+        ib = self._require_connected()
+        if not hasattr(ib, "reqHistoricalNews"):
+            return []
+        provider_map = self.news_providers()
+        provider_codes = _select_news_provider_codes(
+            provider_map,
+            preferred_names=provider_names or self.config.news_provider_names,
+        )
+        if not provider_codes:
+            return []
+        contract = self.qualify_equity(symbol, exchange=exchange, currency=currency)
+        end_at = datetime.now(UTC)
+        start_at = end_at - timedelta(hours=max(int(lookback_hours), 1))
+        raw_items = ib.reqHistoricalNews(
+            int(getattr(contract, "conId")),
+            ",".join(provider_codes),
+            start_at.strftime("%Y%m%d %H:%M:%S"),
+            end_at.strftime("%Y%m%d %H:%M:%S"),
+            max(int(max_results), 1),
+            [],
+        )
+        headlines: list[IBNewsHeadline] = []
+        for item in raw_items or []:
+            published_at = pd.Timestamp(getattr(item, "time", end_at))
+            published_at = published_at.tz_localize(UTC) if published_at.tzinfo is None else published_at.tz_convert(UTC)
+            provider_code = str(getattr(item, "providerCode", "") or "")
+            headlines.append(
+                IBNewsHeadline(
+                    symbol=symbol,
+                    provider_code=provider_code,
+                    provider_name=provider_map.get(provider_code),
+                    article_id=str(getattr(item, "articleId", "") or ""),
+                    headline=str(getattr(item, "headline", "") or ""),
+                    published_at=published_at.to_pydatetime(),
+                )
+            )
+        headlines.sort(key=lambda item: item.published_at, reverse=True)
+        return headlines
+
+    def news_sentiment(
+        self,
+        symbol: str,
+        *,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        provider_names: Sequence[str] | None = None,
+        lookback_hours: int = 24,
+        max_results: int = 25,
+        extreme_threshold: float = 2.0,
+    ) -> IBNewsSentiment:
+        """Score recent IB news headlines for a simple extreme-sentiment overlay."""
+
+        headlines = self.fetch_news_headlines(
+            symbol,
+            exchange=exchange,
+            currency=currency,
+            provider_names=provider_names,
+            lookback_hours=lookback_hours,
+            max_results=max_results,
+        )
+        score = _headline_sentiment_score(headlines)
+        label = _sentiment_label(score, extreme_threshold=extreme_threshold)
+        return IBNewsSentiment(
+            symbol=symbol,
+            score=score,
+            label=label,
+            headline_count=len(headlines),
+            extreme=abs(score) >= extreme_threshold,
+            headlines=tuple(headlines),
+        )
 
     def _resolve_option_contract(self, contract: OptionContract | OptionSnapshot) -> Any:
         option_contract = contract.contract if isinstance(contract, OptionSnapshot) else contract
@@ -843,10 +1101,54 @@ class IBGatewayClient:
                 return chain
         return chains[0]
 
+    def _session_snapshot(self, ib: Any, *, port: int, client_id: int) -> dict[str, object]:
+        managed_accounts = list(_safe_call(ib, "managedAccounts", default=[]))
+        return {
+            "port": port,
+            "client_id": client_id,
+            "managed_accounts": managed_accounts,
+            "connected": bool(_safe_call(ib, "isConnected", default=True)),
+        }
+
+    def _connect_session(
+        self,
+        ib: Any,
+        *,
+        port: int,
+        client_id: int,
+        readonly: bool,
+        fetch_none: bool,
+    ) -> None:
+        runtime = _load_ib_async()
+        connect_kwargs: dict[str, object] = {
+            "clientId": client_id,
+            "timeout": self.config.timeout,
+        }
+        if readonly:
+            connect_kwargs["readonly"] = True
+        if fetch_none and "StartupFetchNONE" in runtime:
+            connect_kwargs["fetchFields"] = runtime["StartupFetchNONE"]
+        try:
+            ib.connect(self.config.host, port, **connect_kwargs)
+        except TypeError:
+            connect_kwargs.pop("fetchFields", None)
+            try:
+                ib.connect(self.config.host, port, **connect_kwargs)
+            except TypeError:
+                connect_kwargs.pop("readonly", None)
+                ib.connect(self.config.host, port, **connect_kwargs)
+
     def _require_connected(self) -> Any:
         if not self._connected or self._ib is None:
             raise RuntimeError("IB Gateway client is not connected.")
         return self._ib
+
+    def _require_execution_connected(self) -> Any:
+        if self.config.read_only_data_only:
+            raise RuntimeError("IB execution session is disabled in read-only data-only mode.")
+        if not self._connected or self._execution_ib is None:
+            raise RuntimeError("IB Gateway execution client is not connected.")
+        return self._execution_ib
 
     @staticmethod
     def _default_ib_factory() -> Any:
@@ -855,7 +1157,7 @@ class IBGatewayClient:
 
 def _load_ib_async() -> dict[str, Any]:
     try:
-        from ib_async import Bag, ComboLeg, IB, LimitOrder, MarketOrder, Option, Stock
+        from ib_async import Bag, ComboLeg, IB, LimitOrder, MarketOrder, Option, ScannerSubscription, Stock, StartupFetchNONE
     except ImportError as error:  # pragma: no cover - exercised by runtime setup, not unit tests
         raise RuntimeError(
             "ib_async is required for IB Gateway support. Install it with `pip install ib_async`."
@@ -867,7 +1169,9 @@ def _load_ib_async() -> dict[str, Any]:
         "LimitOrder": LimitOrder,
         "MarketOrder": MarketOrder,
         "Option": Option,
+        "ScannerSubscription": ScannerSubscription,
         "Stock": Stock,
+        "StartupFetchNONE": StartupFetchNONE,
     }
 
 
@@ -1019,6 +1323,106 @@ def _safe_call(obj: Any, method_name: str, *, default: Any) -> Any:
     if method is None:
         return default
     return method()
+
+
+def _scanner_item_symbol(row: Any) -> str | None:
+    contract_details = getattr(row, "contractDetails", None)
+    if contract_details is not None:
+        contract = getattr(contract_details, "contract", None)
+        if contract is not None:
+            symbol = str(getattr(contract, "symbol", "") or "").strip().upper()
+            if symbol:
+                return symbol
+    contract = getattr(row, "contract", None)
+    if contract is not None:
+        symbol = str(getattr(contract, "symbol", "") or "").strip().upper()
+        if symbol:
+            return symbol
+    details = getattr(row, "details", None)
+    if details is not None:
+        contract = getattr(details, "contract", None)
+        if contract is not None:
+            symbol = str(getattr(contract, "symbol", "") or "").strip().upper()
+            if symbol:
+                return symbol
+    symbol = str(getattr(row, "symbol", "") or "").strip().upper()
+    return symbol or None
+
+
+def _select_news_provider_codes(
+    providers: dict[str, str],
+    *,
+    preferred_names: Sequence[str],
+) -> list[str]:
+    desired = [value.lower() for value in preferred_names]
+    selected: list[str] = []
+    for code, name in providers.items():
+        normalized_name = name.lower()
+        if any(desired_name in normalized_name for desired_name in desired):
+            selected.append(code)
+    return selected
+
+
+def _headline_sentiment_score(headlines: Sequence[IBNewsHeadline]) -> float:
+    if not headlines:
+        return 0.0
+    total = 0.0
+    for headline in headlines:
+        total += _single_headline_score(headline.headline)
+    return float(total / max(len(headlines), 1))
+
+
+def _single_headline_score(headline: str) -> float:
+    positive_terms = (
+        "beats",
+        "beat",
+        "upgrade",
+        "upgrades",
+        "surges",
+        "surge",
+        "rally",
+        "rebound",
+        "strong",
+        "record",
+        "bullish",
+        "buyback",
+    )
+    negative_terms = (
+        "miss",
+        "misses",
+        "downgrade",
+        "downgrades",
+        "plunge",
+        "plunges",
+        "probe",
+        "lawsuit",
+        "weak",
+        "fraud",
+        "crash",
+        "bearish",
+        "cuts",
+    )
+    lowered = headline.lower()
+    score = 0.0
+    for term in positive_terms:
+        if term in lowered:
+            score += 1.0
+    for term in negative_terms:
+        if term in lowered:
+            score -= 1.0
+    return score
+
+
+def _sentiment_label(score: float, *, extreme_threshold: float) -> str:
+    if score >= extreme_threshold:
+        return "extreme_positive"
+    if score <= -extreme_threshold:
+        return "extreme_negative"
+    if score > 0:
+        return "positive"
+    if score < 0:
+        return "negative"
+    return "neutral"
 
 
 def _intrinsic_option_price(*, spot: float, strike: float, option_type: OptionKind) -> float:

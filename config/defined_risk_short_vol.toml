@@ -1,0 +1,166 @@
+[app]
+mode = "sim"
+venues = ["mt5", "ib"]
+output_dir = "runtime/defined_risk_short_vol"
+state_file = "runtime/defined_risk_short_vol/state.json"
+log_level = "INFO"
+
+[runtime]
+poll_seconds = 300
+run_once = true
+timezone = "America/Sao_Paulo"
+market_open = "10:00"
+market_close = "18:00"
+us_market_open = "10:30"
+us_market_close = "17:00"
+
+[pricing]
+brl_risk_free_rate = 0.14
+usd_risk_free_rate = 0.045
+surface_method = "svi"
+min_surface_points = 5
+surface_weight = 0.75
+forecast_weight = 0.25
+minimum_volatility = 0.05
+physical_drift = 0.00
+distribution_grid_size = 129
+
+[discovery]
+screen_all_discovered_assets = true
+history_bars = 90
+force_exit_dte = 2
+event_exit_days = 2
+
+[discovery.mt5]
+option_path = "OPCOES"
+dte_min = 5
+dte_max = 45
+max_expiries_per_underlying = 3
+max_strikes_per_right = 18
+moneyness_window = 0.25
+selection_wait_seconds = 1.5
+include_underlyings = []
+exclude_underlyings = []
+
+[discovery.ib]
+symbols = []
+exchange = "SMART"
+currency = "USD"
+dte_min = 5
+dte_max = 45
+max_expiries_per_underlying = 3
+max_strikes_per_right = 12
+moneyness_window = 0.20
+scanner_locations = ["STK.US.MAJOR", "STK.US.MINOR"]
+scanner_scan_codes = ["HOT_BY_VOLUME", "MOST_ACTIVE", "TOP_PERC_GAIN"]
+scanner_max_results = 250
+
+[liquidity]
+min_short_leg_volume = 200
+min_long_leg_volume = 50
+min_open_interest = 200
+max_short_leg_spread_pct = 0.12
+max_long_leg_spread_pct = 0.25
+max_condor_leg_spread_pct = 0.18
+
+[strategies.bull_put]
+enabled = true
+short_delta_min = 0.08
+short_delta_max = 0.35
+min_credit = 0.05
+width_pct_of_spot_cap = 0.10
+target_capture_pct = 0.50
+stop_multiple = 2.00
+min_expected_value = 0.00
+
+[strategies.bear_call]
+enabled = true
+short_delta_min = 0.08
+short_delta_max = 0.35
+min_credit = 0.05
+width_pct_of_spot_cap = 0.10
+target_capture_pct = 0.50
+stop_multiple = 2.00
+min_expected_value = 0.00
+
+[strategies.iron_condor]
+enabled = true
+short_delta_min = 0.10
+short_delta_max = 0.35
+min_total_credit = 0.12
+width_pct_of_spot_cap = 0.10
+target_capture_pct = 0.50
+stop_multiple = 2.00
+min_expected_value = 0.00
+max_total_width_pct_of_spot = 0.18
+
+[ranking]
+top_candidates_per_cycle = 25
+
+[ranking.weights]
+expected_value = 0.30
+return_on_risk = 0.20
+probability_of_profit = 0.15
+cvar_penalty = 0.15
+liquidity = 0.10
+vol_regime = 0.10
+
+[risk]
+capital_base = 100000.0
+max_total_capital_at_risk_pct = 0.40
+max_position_capital_at_risk_pct = 0.03
+max_positions_total = 20
+max_positions_per_underlying = 1
+max_positions_per_venue = 10
+max_contracts_per_trade = 200
+max_abs_delta = 5000.0
+max_short_gamma = 250.0
+max_short_vega = 10000.0
+
+[execution]
+order_type = "LMT"
+price_rounding = 2
+price_buffer_pct = 0.00
+allow_paper_broker_orders = true
+allow_live_orders = false
+mt5_legged_execution_enabled = false
+tag = "defined_risk_short_vol"
+
+[venues.mt5.data]
+path = ""
+login = 0
+password = ""
+server = ""
+
+[venues.mt5.paper]
+path = ""
+login = 0
+password = ""
+server = ""
+require_demo = true
+
+[venues.mt5.live]
+path = ""
+login = 0
+password = ""
+server = ""
+require_demo = false
+
+[venues.ib.data]
+host = "127.0.0.1"
+port = 4001
+client_id = 3
+account = ""
+market_data_type = 1
+
+[venues.ib.paper]
+host = "127.0.0.1"
+port = 4002
+client_id = 13
+account = ""
+
+[venues.ib.live]
+host = "127.0.0.1"
+port = 4001
+client_id = 23
+account = ""

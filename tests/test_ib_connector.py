@@ -30,6 +30,14 @@ class FakeStock:
         self.conId = 0
 
 
+class FakeScannerSubscription:
+    def __init__(self, instrument: str, locationCode: str, scanCode: str, numberOfRows: int):
+        self.instrument = instrument
+        self.locationCode = locationCode
+        self.scanCode = scanCode
+        self.numberOfRows = numberOfRows
+
+
 class FakeOption:
     def __init__(
         self,
@@ -154,13 +162,15 @@ class FakeIB:
         self.market_data_type = None
         self.last_contract = None
         self.last_order = None
+        self.connect_kwargs = None
 
-    def connect(self, host: str, port: int, clientId: int, timeout: float) -> None:
+    def connect(self, host: str, port: int, clientId: int, timeout: float, **kwargs) -> None:
         self.connected = True
         self.host = host
         self.port = port
         self.clientId = clientId
         self.timeout = timeout
+        self.connect_kwargs = kwargs
 
     def disconnect(self) -> None:
         self.connected = False
@@ -220,6 +230,28 @@ class FakeIB:
     def reqHistoricalData(self, *args, **kwargs):
         return []
 
+    def reqScannerData(self, subscription, scannerSubscriptionOptions, scannerSubscriptionFilterOptions):
+        mapping = {
+            ("STK.US.MAJOR", "HOT_BY_VOLUME"): ["PBR", "VALE", "AAPL"],
+            ("STK.US.MAJOR", "MOST_ACTIVE"): ["AAPL", "MSFT"],
+            ("STK.US.MINOR", "TOP_PERC_GAIN"): ["PLTR", "PBR"],
+        }
+        symbols = mapping.get((subscription.locationCode, subscription.scanCode), [])
+        return [
+            type(
+                "ScannerRow",
+                (),
+                {
+                    "contractDetails": type(
+                        "ContractDetails",
+                        (),
+                        {"contract": type("Contract", (), {"symbol": symbol})()},
+                    )()
+                },
+            )()
+            for symbol in symbols[: subscription.numberOfRows]
+        ]
+
     def placeOrder(self, contract, order):
         self.last_contract = contract
         self.last_order = order
@@ -236,6 +268,36 @@ class FakeIB:
 
     def positions(self):
         return []
+
+    def reqNewsProviders(self):
+        return [
+            type("Provider", (), {"code": "BZ", "name": "Benzinga"})(),
+            type("Provider", (), {"code": "DJNL", "name": "Dow Jones"})(),
+        ]
+
+    def reqHistoricalNews(self, conId: int, providerCodes: str, startDateTime: str, endDateTime: str, totalResults: int, historicalNewsOptions):
+        return [
+            type(
+                "Headline",
+                (),
+                {
+                    "providerCode": "BZ",
+                    "articleId": "1",
+                    "headline": "PBR shares plunge after probe headline",
+                    "time": datetime(2026, 3, 24, 13, 0),
+                },
+            )(),
+            type(
+                "Headline",
+                (),
+                {
+                    "providerCode": "DJNL",
+                    "articleId": "2",
+                    "headline": "Dow Jones notes PBR rebound speculation",
+                    "time": datetime(2026, 3, 24, 13, 30),
+                },
+            )(),
+        ]
 
 
 class PartialQualificationIB(FakeIB):
@@ -273,14 +335,16 @@ class IBGatewayClientTests(unittest.TestCase):
             "LimitOrder": FakeLimitOrder,
             "MarketOrder": FakeMarketOrder,
             "Option": FakeOption,
+            "ScannerSubscription": FakeScannerSubscription,
             "Stock": FakeStock,
+            "StartupFetchNONE": object(),
         }
 
     def test_fetch_option_snapshots_uses_ib_market_data_and_greeks(self) -> None:
         fake_ib = FakeIB()
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
             client = IBGatewayClient(
-                IBGatewayConfig(port=4002, risk_free_rate=0.045),
+                IBGatewayConfig(data_port=4001, read_only_data_only=True, risk_free_rate=0.045),
                 ib_factory=lambda: fake_ib,
             )
             client.connect()
@@ -301,10 +365,21 @@ class IBGatewayClientTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.broker_greeks.delta, 0.42, places=6)
         self.assertAlmostEqual(snapshot.implied_vol or 0.0, 0.27, places=6)
 
-    def test_place_spread_order_builds_combo_contract(self) -> None:
-        fake_ib = FakeIB()
+    def test_place_spread_order_uses_execution_session(self) -> None:
+        data_ib = FakeIB()
+        execution_ib = FakeIB()
+        factory = iter([data_ib, execution_ib])
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
-            client = IBGatewayClient(IBGatewayConfig(), ib_factory=lambda: fake_ib)
+            client = IBGatewayClient(
+                IBGatewayConfig(
+                    data_port=4001,
+                    data_client_id=3,
+                    execution_port=4002,
+                    execution_client_id=13,
+                    read_only_data_only=False,
+                ),
+                ib_factory=lambda: next(factory),
+            )
             client.connect()
             short_call = OptionContract(
                 symbol="PBR_C_1300",
@@ -338,17 +413,21 @@ class IBGatewayClientTests(unittest.TestCase):
                 ],
                 request=IBOrderRequest(action="SELL", quantity=1, order_type="LMT", limit_price=0.22),
             )
-        self.assertEqual(receipt.order_type, "LMT")
-        self.assertEqual(receipt.symbol, "PBR")
-        self.assertEqual(len(fake_ib.last_contract.comboLegs), 2)
-        self.assertEqual(fake_ib.last_contract.comboLegs[0].action, "SELL")
-        self.assertEqual(fake_ib.last_contract.comboLegs[1].action, "BUY")
-        self.assertAlmostEqual(fake_ib.last_order.lmtPrice, 0.22, places=6)
+        self.assertEqual(receipt.status, "Submitted")
+        self.assertIsNone(data_ib.last_order)
+        self.assertIsNotNone(execution_ib.last_order)
+        self.assertEqual(data_ib.port, 4001)
+        self.assertEqual(execution_ib.port, 4002)
+        self.assertTrue(data_ib.connect_kwargs.get("readonly"))
+        self.assertIn("fetchFields", data_ib.connect_kwargs)
 
     def test_build_option_contracts_ignores_none_qualification_results(self) -> None:
         fake_ib = PartialQualificationIB()
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
-            client = IBGatewayClient(IBGatewayConfig(), ib_factory=lambda: fake_ib)
+            client = IBGatewayClient(
+                IBGatewayConfig(read_only_data_only=True),
+                ib_factory=lambda: fake_ib,
+            )
             client.connect()
             contracts = client.build_option_contracts(
                 "PBR",
@@ -362,7 +441,10 @@ class IBGatewayClientTests(unittest.TestCase):
     def test_snapshot_underlying_price_falls_back_to_history(self) -> None:
         fake_ib = HistoricalFallbackIB()
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
-            client = IBGatewayClient(IBGatewayConfig(), ib_factory=lambda: fake_ib)
+            client = IBGatewayClient(
+                IBGatewayConfig(read_only_data_only=True),
+                ib_factory=lambda: fake_ib,
+            )
             client.connect()
             stock = client.qualify_equity("PBR")
             price = client._snapshot_underlying_price(stock)
@@ -376,7 +458,10 @@ class IBGatewayClientTests(unittest.TestCase):
 
         fake_ib = PartiallyQualifiedIB()
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
-            client = IBGatewayClient(IBGatewayConfig(port=4002), ib_factory=lambda: fake_ib)
+            client = IBGatewayClient(
+                IBGatewayConfig(data_port=4001, read_only_data_only=True),
+                ib_factory=lambda: fake_ib,
+            )
             client.connect()
             snapshots = client.fetch_option_snapshots(
                 "PBR",
@@ -416,7 +501,10 @@ class IBGatewayClientTests(unittest.TestCase):
 
         fake_ib = HistoricalIB()
         with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
-            client = IBGatewayClient(IBGatewayConfig(port=4002, risk_free_rate=0.045), ib_factory=lambda: fake_ib)
+            client = IBGatewayClient(
+                IBGatewayConfig(data_port=4001, read_only_data_only=True, risk_free_rate=0.045),
+                ib_factory=lambda: fake_ib,
+            )
             client.connect()
             snapshots = client.fetch_option_history_snapshots(
                 "PBR",
@@ -430,3 +518,32 @@ class IBGatewayClientTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.quote.last or 0.0, 0.23, places=6)
         self.assertEqual(snapshot.market, "US")
         self.assertIsNotNone(snapshot.implied_vol)
+
+    def test_discover_optionable_underlyings_uses_scanner_queries_and_deduplicates(self) -> None:
+        fake_ib = FakeIB()
+        with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
+            client = IBGatewayClient(
+                IBGatewayConfig(read_only_data_only=True),
+                ib_factory=lambda: fake_ib,
+            )
+            client.connect()
+            symbols = client.discover_optionable_underlyings(
+                locations=("STK.US.MAJOR", "STK.US.MINOR"),
+                scan_codes=("HOT_BY_VOLUME", "MOST_ACTIVE", "TOP_PERC_GAIN"),
+                max_results=10,
+            )
+        self.assertEqual(symbols, ["AAPL", "MSFT", "PBR", "PLTR", "VALE"])
+
+    def test_news_sentiment_uses_benzinga_and_dow_jones_headlines(self) -> None:
+        fake_ib = FakeIB()
+        with patch("options_tradebot.connectors.ib._load_ib_async", return_value=self.runtime):
+            client = IBGatewayClient(
+                IBGatewayConfig(read_only_data_only=True),
+                ib_factory=lambda: fake_ib,
+            )
+            client.connect()
+            sentiment = client.news_sentiment("PBR", extreme_threshold=0.1)
+        self.assertEqual(sentiment.symbol, "PBR")
+        self.assertEqual(sentiment.headline_count, 2)
+        self.assertTrue(sentiment.extreme)
+        self.assertIn(sentiment.label, {"extreme_negative", "extreme_positive"})

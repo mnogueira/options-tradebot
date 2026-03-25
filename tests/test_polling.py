@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from options_tradebot.utils.polling import repeat_with_interval
+from options_tradebot.utils.polling import repeat_with_interval, run_during_market_hours
 
 
 class PollingTests(unittest.TestCase):
@@ -67,3 +67,40 @@ class PollingTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertIn("failed: boom", stderr.getvalue())
         self.assertIn("Completed live market scan run 2.", stdout.getvalue())
+
+    def test_run_during_market_hours_waits_until_open_then_runs(self) -> None:
+        events: list[tuple[str, float] | str] = []
+        clock = iter(
+            [
+                datetime(2026, 3, 25, 9, 55, 0),
+                datetime(2026, 3, 25, 10, 0, 0),
+                datetime(2026, 3, 25, 10, 0, 0),
+                datetime(2026, 3, 25, 10, 0, 0),
+            ]
+        )
+
+        def task() -> None:
+            events.append("scan")
+
+        def sleep_fn(seconds: float) -> None:
+            events.append(("sleep", seconds))
+
+        stdout = StringIO()
+        exit_code = run_during_market_hours(
+            task,
+            interval_seconds=300.0,
+            market_open="10:00",
+            market_close="18:00",
+            timezone="America/Sao_Paulo",
+            max_iterations=1,
+            task_name="short-vol scan",
+            sleep_fn=sleep_fn,
+            now_fn=lambda: next(clock),
+            stdout=stdout,
+            stderr=StringIO(),
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(events, [("sleep", 300.0), "scan"])
+        self.assertIn("Waiting 300s for market open", stdout.getvalue())
+        self.assertIn("Starting short-vol scan run 1.", stdout.getvalue())

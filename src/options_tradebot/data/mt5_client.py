@@ -197,6 +197,44 @@ class MT5MarketDataClient:
         }
         return sorted(value for value in underlyings if value)
 
+    def option_symbol_catalog(
+        self,
+        *,
+        underlying: str | None = None,
+        option_path: str = "OPCOES",
+    ) -> list[dict[str, object]]:
+        """Return option symbol metadata exposed by MT5 for one underlying or the full venue."""
+
+        mt5 = self._require_connected()
+        path_token = option_path.upper()
+        target_underlying = None if underlying is None else underlying.upper()
+        rows: list[dict[str, object]] = []
+        for info in mt5.symbols_get("*") or []:
+            path = str(getattr(info, "path", "") or "").upper()
+            basis = str(getattr(info, "basis", "") or "").upper()
+            if path_token not in path or not basis:
+                continue
+            if target_underlying is not None and basis != target_underlying:
+                continue
+            expiry = _mt5_expiry_date(getattr(info, "expiration_time", 0))
+            strike = float(getattr(info, "option_strike", 0.0) or 0.0)
+            if expiry is None or strike <= 0:
+                continue
+            rows.append(
+                {
+                    "symbol": str(getattr(info, "name", "")),
+                    "underlying": basis,
+                    "option_type": _mt5_option_type(getattr(info, "option_right", 0)).value,
+                    "strike": strike,
+                    "expiry": expiry,
+                    "contract_multiplier": int(getattr(info, "trade_contract_size", 100) or 100),
+                    "session_deals": int(float(getattr(info, "session_deals", 0) or 0)),
+                    "session_interest": _coerce_optional_interest(getattr(info, "session_interest", None)),
+                }
+            )
+        rows.sort(key=lambda item: (str(item["underlying"]), item["expiry"], str(item["option_type"]), float(item["strike"])))
+        return rows
+
     def collect_live_option_snapshots(
         self,
         *,
